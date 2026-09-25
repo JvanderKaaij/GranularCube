@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Audio & Text Proxy Interface</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --accent-sfx: #a855f7;
+      --accent-sfx-hover: #9333ea;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --error: #f87171;
+      --success: #4ade80;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 800px;
+      background: var(--card-bg);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border);
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 6px;
+    }
+
+    p.subtitle {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      padding: 8px 16px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+
+    .tab-btn.active-chat {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+    }
+
+    .tab-btn.active-sfx {
+      background: rgba(168, 85, 247, 0.15);
+      color: var(--accent-sfx);
+    }
+
+    .tab-pane {
+      display: none;
+    }
+
+    .tab-pane.active {
+      display: block;
+    }
+
+    .form-group {
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      padding: 12px 14px;
+      background: #0b1120;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input:focus, textarea:focus, select:focus {
+      border-color: var(--accent);
+    }
+
+    .tab-pane.active-sfx-pane input:focus, .tab-pane.active-sfx-pane textarea:focus {
+      border-color: var(--accent-sfx);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    button.btn-chat {
+      width: 100%;
+      padding: 14px;
+      background: var(--accent);
+      color: #041226;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button.btn-chat:hover {
+      background: var(--accent-hover);
+    }
+
+    button.btn-sfx {
+      width: 100%;
+      padding: 14px;
+      background: var(--accent-sfx);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button.btn-sfx:hover {
+      background: var(--accent-sfx-hover);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .output-section {
+      margin-top: 24px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .response-box {
+      background: #0b1120;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 70px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: "Fira Code", Consolas, Monaco, monospace;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    .audio-player-wrapper {
+      margin-top: 14px;
+      padding: 14px;
+      background: #0b1120;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      display: none;
+    }
+
+    audio {
+      width: 100%;
+      outline: none;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .status-ok { background: rgba(74, 222, 128, 0.15); color: var(--success); }
+    .status-err { background: rgba(248, 113, 113, 0.15); color: var(--error); }
+    .status-mock { background: rgba(234, 179, 8, 0.15); color: #facc15; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>AI Studio API Interface</h1>
+  <p class="subtitle">OpenAI Chat & ElevenLabs Sound Effects Generator</p>
+
+  <div class="tab-bar">
+    <button class="tab-btn active-chat" id="tabChatBtn" onclick="switchTab('chat')">💬 OpenAI Chat</button>
+    <button class="tab-btn" id="tabSfxBtn" onclick="switchTab('sfx')">🔊 ElevenLabs Sound Effects</button>
+  </div>
+
+  <!-- Chat Pane -->
+  <div class="tab-pane active" id="paneChat">
+    <form id="chatForm">
+      <div class="grid-2">
+        <div class="form-group">
+          <label>Endpoint</label>
+          <input type="text" id="chatUrl" value="http://localhost:8000/api/chat" required>
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <select id="chatModel">
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>System Instructions (Optional)</label>
+        <input type="text" id="chatSystem" placeholder="e.g. You are a sound design expert.">
+      </div>
+      <div class="form-group">
+        <label>Prompt</label>
+        <textarea id="chatPrompt" placeholder="Ask a question or enter text..." required></textarea>
+      </div>
+      <button type="submit" class="btn-chat" id="chatSubmitBtn">Send to OpenAI</button>
+    </form>
+  </div>
+
+  <!-- SFX Pane -->
+  <div class="tab-pane" id="paneSfx">
+    <form id="sfxForm">
+      <div class="grid-2">
+        <div class="form-group">
+          <label>Endpoint</label>
+          <input type="text" id="sfxUrl" value="http://localhost:8000/api/sfx" required>
+        </div>
+        <div class="form-group">
+          <label>Duration (Seconds, 0.5 - 22)</label>
+          <input type="number" id="sfxDuration" min="0.5" max="22" step="0.5" value="3.0">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Prompt Influence (0.0 to 1.0)</label>
+        <input type="number" id="sfxInfluence" min="0.0" max="1.0" step="0.1" value="0.3">
+      </div>
+      <div class="form-group">
+        <label>Sound Effect Description</label>
+        <textarea id="sfxPrompt" placeholder="e.g. Granular futuristic laser hit with metallic resonance reverb" required></textarea>
+      </div>
+      <button type="submit" class="btn-sfx" id="sfxSubmitBtn">Generate Sound Effect</button>
+    </form>
+  </div>
+
+  <!-- Output Section -->
+  <div class="output-section">
+    <label>Result</label>
+    <div id="statusBadge" class="status-badge" style="display: none;"></div>
+    <div class="response-box" id="responseBox">Ready for input...</div>
+    
+    <div class="audio-player-wrapper" id="audioWrapper">
+      <label style="margin-bottom: 8px;">Audio Preview:</label>
+      <audio id="audioPlayer" controls></audio>
+      <div style="margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);">
+        Download URL: <a id="audioLink" href="#" target="_blank" style="color: var(--accent);">Direct File</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function switchTab(tab) {
+    const paneChat = document.getElementById('paneChat');
+    const paneSfx = document.getElementById('paneSfx');
+    const tabChatBtn = document.getElementById('tabChatBtn');
+    const tabSfxBtn = document.getElementById('tabSfxBtn');
+
+    if (tab === 'chat') {
+      paneChat.classList.add('active');
+      paneSfx.classList.remove('active');
+      tabChatBtn.className = 'tab-btn active-chat';
+      tabSfxBtn.className = 'tab-btn';
+    } else {
+      paneSfx.classList.add('active');
+      paneChat.classList.remove('active');
+      tabChatBtn.className = 'tab-btn';
+      tabSfxBtn.className = 'tab-btn active-sfx';
+    }
+  }
+
+  // OpenAI Chat Submit
+  document.getElementById('chatForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('chatSubmitBtn');
+    const box = document.getElementById('responseBox');
+    const badge = document.getElementById('statusBadge');
+    const audioWrap = document.getElementById('audioWrapper');
+
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    box.textContent = 'Waiting for response...';
+    badge.style.display = 'none';
+    audioWrap.style.display = 'none';
+
+    try {
+      const res = await fetch(document.getElementById('chatUrl').value.trim(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: document.getElementById('chatPrompt').value.trim(),
+          system_prompt: document.getElementById('chatSystem').value.trim() || undefined,
+          model: document.getElementById('chatModel').value
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+
+      badge.textContent = data.is_mock ? 'Status: 200 OK (Mock Mode)' : 'Status: 200 OK';
+      badge.className = data.is_mock ? 'status-badge status-mock' : 'status-badge status-ok';
+      badge.style.display = 'inline-block';
+      box.textContent = data.response;
+    } catch (err) {
+      badge.textContent = 'Error';
+      badge.className = 'status-badge status-err';
+      badge.style.display = 'inline-block';
+      box.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Send to OpenAI';
+    }
+  });
+
+  // ElevenLabs SFX Submit
+  document.getElementById('sfxForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('sfxSubmitBtn');
+    const box = document.getElementById('responseBox');
+    const badge = document.getElementById('statusBadge');
+    const audioWrap = document.getElementById('audioWrapper');
+    const audioPlayer = document.getElementById('audioPlayer');
+    const audioLink = document.getElementById('audioLink');
+
+    btn.disabled = true;
+    btn.textContent = 'Generating Audio...';
+    box.textContent = 'Waiting for ElevenLabs...';
+    badge.style.display = 'none';
+    audioWrap.style.display = 'none';
+
+    try {
+      const durationVal = parseFloat(document.getElementById('sfxDuration').value);
+      const influenceVal = parseFloat(document.getElementById('sfxInfluence').value);
+
+      const res = await fetch(document.getElementById('sfxUrl').value.trim(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: document.getElementById('sfxPrompt').value.trim(),
+          duration_seconds: isNaN(durationVal) ? undefined : durationVal,
+          prompt_influence: isNaN(influenceVal) ? 0.3 : influenceVal
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+
+      badge.textContent = data.is_mock ? 'Status: 200 OK (Mock Mode)' : 'Status: 200 OK';
+      badge.className = data.is_mock ? 'status-badge status-mock' : 'status-badge status-ok';
+      badge.style.display = 'inline-block';
+      box.textContent = `Generated: ${data.prompt}\nFile: ${data.filename}\nURL: ${data.audio_url}`;
+
+      if (data.audio_base64) {
+        audioPlayer.src = data.audio_base64;
+        audioLink.href = data.audio_url;
+        audioLink.textContent = data.audio_url;
+        audioWrap.style.display = 'block';
+        audioPlayer.play().catch(() => {});
+      }
+    } catch (err) {
+      badge.textContent = 'Error';
+      badge.className = 'status-badge status-err';
+      badge.style.display = 'inline-block';
+      box.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Generate Sound Effect';
+    }
+  });
+</script>
+
+</body>
+</html>
