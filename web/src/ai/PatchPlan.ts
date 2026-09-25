@@ -69,14 +69,25 @@ export function buildMoodPrompt(mood: string, snapshot: PatchSnapshot): string {
   return `Mood: ${mood.trim()}\n\nAvailable built-in samples (choose the exact file value for each granular module):\n${JSON.stringify(sampleCatalog, null, 2)}\n\nCurrent patch settings and sample context:\n${JSON.stringify(snapshot, null, 2)}\n\nExample of the required response format (replace values to suit the mood; retain IDs, types, and parameter keys, choose samples, and compose a bell sequence when present):\n${JSON.stringify(example, null, 2)}`;
 }
 
-export const IMAGE_PATCH_SYSTEM_PROMPT = `${PATCH_SYSTEM_PROMPT}\nFor an image request, also return top-level \"description\" (one factual sentence about visible content), \"mood\" (concise musical intention), and \"composition\" (one or two sentences explaining how the layers relate). Give EVERY module a short \"role\" (such as recognizable scene sound, sustained pad, rhythmic pulse, lead, percussion, or bell accents). Every granular module also needs \"source\": either \"sfx\" or \"built_in\". Choose EXACTLY ONE granular module with source \"sfx\" and give it a short \"sfx_keyword\" describing an audible object or plausible action in the image. It generates one recognizable sound effect. Its sample field should remain its current filename as a placeholder, and selectionStart=0 and selectionEnd=0. ALL other granular modules must have source \"built_in\" and choose exact filenames from the available built-in sample catalog; do not give them an sfx_keyword. You can turn an existing sustained sample into a pad with longer overlapping grains, or an existing transient/instrument sample into a lead or percussive line with shorter, sparser grains. Aim for distinct complementary roles; use a built-in pad and a built-in lead or rhythmic/percussive part when enough granular modules exist. If choosing a different built-in sample, set selectionStart=0 and selectionEnd=0. Use any bell modules as complementary struck notes or accents and compose their sequences. Make the synth's rhythm, density, timbre, filter, notes, and all module and master FX support the scene sound so the music and SFX feel connected to the events and atmosphere in the image. Prioritize visible sound sources over generic mood words. Do not invent motion or sound that the still image does not support. The application starts all image-composition modules after applying the patch, so set levels suitable for simultaneous playback.`;
+export const IMAGE_PATCH_SYSTEM_PROMPT = `${PATCH_SYSTEM_PROMPT}\nFor an image request, also return top-level \"description\" (one factual sentence about visible content), \"mood\" (concise musical intention), and \"composition\" (one or two sentences explaining how the layers relate). Give EVERY module a short \"role\" (such as recognizable scene sound, sustained pad, rhythmic pulse, lead, percussion, or bell accents). Every granular module also needs \"source\": either \"sfx\" or \"built_in\". Choose EXACTLY ONE granular module with source \"sfx\" and give it a short \"sfx_keyword\" describing an audible object or plausible action in the image. It generates one recognizable sound effect. Its sample field should remain its current filename as a placeholder, and selectionStart=0 and selectionEnd=0. ALL other granular modules must have source \"built_in\" and choose exact filenames from the available built-in sample catalog; do not give them an sfx_keyword. You can turn an existing sustained sample into a pad with longer overlapping grains, or an existing transient/instrument sample into a lead or percussive line with shorter, sparser grains. Aim for distinct complementary roles; use a built-in pad and a built-in lead or rhythmic/percussive part when enough granular modules exist. If choosing a different built-in sample, set selectionStart=0 and selectionEnd=0. Use bell modules as complementary struck notes or accents. Compose a fresh sequence for each bell that differs from its current sequence and fits the scene mood. Make the synth's rhythm, density, timbre, filter, notes, and all module and master FX support the scene sound so the music and SFX feel connected to the events and atmosphere in the image. Prioritize visible sound sources over generic mood words. Do not invent motion or sound that the still image does not support. The application starts idle image-composition modules at zero level and fades them in while settings transition, so set levels suitable for simultaneous playback.`;
+
+function changedBellSequence(sequence: number[], current: number[], rootNote: number): number[] {
+  if (sequence.length !== current.length || sequence.some((note, index) => note !== current[index])) return sequence;
+  const rotated = [sequence[0], ...sequence.slice(2), sequence[1]];
+  if (rotated.some((note, index) => note !== sequence[index])) return rotated;
+  const replacement = [2, -2, 1, -1]
+    .map((step) => sequence[1] + step)
+    .find((note) => note >= -12 && note <= 24 && rootNote + note >= 48 && rootNote + note <= 96);
+  if (replacement === undefined) return sequence;
+  return [sequence[0], replacement, ...sequence.slice(2)];
+}
 
 export function buildImagePatchPrompt(direction: string, snapshot: PatchSnapshot): string {
   const firstGranularId = snapshot.modules.find((module) => module.type === 'granular')?.id;
   let builtInExampleIndex = 0;
   const exampleModules = snapshot.modules.map((module) => {
     if (module.type === 'bell') {
-      return { id: module.id, type: 'bell', role: 'sparse melodic accents', parameters: module.parameters, sequence: module.sequence };
+      return { id: module.id, type: 'bell', role: 'sparse melodic accents', parameters: module.parameters, sequence: changedBellSequence(module.sequence, module.sequence, module.parameters.rootNote) };
     }
     if (module.id === firstGranularId) {
       return { id: module.id, type: 'granular', role: 'recognizable scene sound', source: 'sfx', sample: module.sample, sfx_keyword: 'visible sound source', parameters: { ...module.parameters, selectionStart: 0, selectionEnd: 0 } };
@@ -101,7 +112,7 @@ export function buildImagePatchPrompt(direction: string, snapshot: PatchSnapshot
   const example = {
     description: 'A concise description of the visible scene and likely sound sources.',
     mood: 'A short musical intention drawn from the image.',
-    composition: 'The recognizable scene sound sits above a soft built-in sample pad and a sparse built-in rhythmic or lead layer; bell strikes add accents if available.',
+    composition: 'The recognizable scene sound sits above a soft built-in sample pad and a sparse built-in rhythmic or lead layer; bell strikes add accents.',
     master: snapshot.master,
     modules: exampleModules,
   };
@@ -111,7 +122,7 @@ export function buildImagePatchPrompt(direction: string, snapshot: PatchSnapshot
     playing: module.playing,
     ...(module.type === 'granular' ? { currentSample: module.sample } : { currentSequence: module.sequence }),
   }));
-  return `Direction: ${direction.trim() || 'Translate the visible scene into a connected soundscape.'}\n\nCompose for the instruments actually present in the patch. Granular modules can play sustained pads with overlapping grains or rhythmic, lead, and percussive parts with shorter, separated grains. Choir and sustained instruments are candidates for pads; shaker and drums for percussion; clarinet, flute, piano, and other instrument samples for lead gestures. A bell module, when present, plays a sequence of struck physical-modeling notes. Use the catalog's note metadata only where it is given; other sample pitches are unknown. Make one generated SFX recognizable and relevant to something visible, then connect the musical layers to that sound and to one another. The layer roles should be audible in the chosen sample, density, grain length, filter, level, and FX settings.\n\nInstruments to compose for (keep these IDs and types):\n${JSON.stringify(roster, null, 2)}\n\nAvailable built-in samples (choose exact file values for every built_in granular source):\n${JSON.stringify(sampleCatalog, null, 2)}\n\nCurrent patch settings and sample context:\n${JSON.stringify(snapshot, null, 2)}\n\nRequired response example (replace the description, mood, composition, roles, sources, sample choices, settings, and bell sequences to fit the image; retain IDs and types):\n${JSON.stringify(example, null, 2)}`;
+  return `Direction: ${direction.trim() || 'Translate the visible scene into a connected soundscape.'}\n\nCompose for the instruments actually present in the patch. Granular modules can play sustained pads with overlapping grains or rhythmic, lead, and percussive parts with shorter, separated grains. Choir and sustained instruments are candidates for pads; shaker and drums for percussion; clarinet, flute, piano, and other instrument samples for lead gestures. The bell module plays a sequence of struck physical-modeling notes; choose a new pattern that expresses the image mood. Use the catalog's note metadata only where it is given; other sample pitches are unknown. Make one generated SFX recognizable and relevant to something visible, then connect the musical layers to that sound and to one another. The layer roles should be audible in the chosen sample, density, grain length, filter, level, and FX settings.\n\nInstruments to compose for (keep these IDs and types):\n${JSON.stringify(roster, null, 2)}\n\nAvailable built-in samples (choose exact file values for every built_in granular source):\n${JSON.stringify(sampleCatalog, null, 2)}\n\nCurrent patch settings and sample context:\n${JSON.stringify(snapshot, null, 2)}\n\nRequired response example (replace the description, mood, composition, roles, sources, sample choices, settings, and bell sequences to fit the image; retain IDs and types):\n${JSON.stringify(example, null, 2)}`;
 }
 
 function record(value: unknown, path: string): Record<string, unknown> {
@@ -240,8 +251,20 @@ export function parseImagePatchPlan(responseText: string, snapshot: PatchSnapsho
   if (typeof root.composition !== 'string' || !root.composition.trim() || root.composition.length > 500) {
     throw new Error('Image response needs a short composition description');
   }
-  const plan = parsePatchPlan(text, snapshot);
+  if (!Array.isArray(root.modules)) throw new Error('image response.modules must be an array');
   const modules = root.modules as unknown[];
+  const normalizedModules = modules.map((module) => {
+    const entry = record(module, 'image module');
+    if (entry.type !== 'granular' || entry.source !== 'sfx') return entry;
+    const current = snapshot.modules.find((item) => item.id === entry.id);
+    const parameters = record(entry.parameters, `GRAIN ${entry.id}.parameters`);
+    return {
+      ...entry,
+      sample: current?.type === 'granular' ? current.sample : entry.sample,
+      parameters: { ...parameters, selectionStart: 0, selectionEnd: 0 },
+    };
+  });
+  const plan = parsePatchPlan(JSON.stringify({ ...root, modules: normalizedModules }), snapshot);
   const sfxKeywords = new Map<number, string>();
   const roles = new Map<number, string>();
   const sources = new Map<number, 'sfx' | 'built_in'>();
@@ -260,17 +283,18 @@ export function parseImagePatchPlan(responseText: string, snapshot: PatchSnapsho
       if (typeof entry.sfx_keyword !== 'string' || !entry.sfx_keyword.trim() || entry.sfx_keyword.length > 80) {
         throw new Error(`GRAIN ${entry.id}: sfx_keyword must be a short sound phrase`);
       }
-      const current = snapshot.modules.find((item) => item.id === entry.id);
-      if (current?.type !== 'granular' || entry.sample !== current.sample) throw new Error(`GRAIN ${entry.id}: sfx source must keep its current sample placeholder`);
-      const settings = plan.modules.find((item) => item.id === entry.id);
-      if (settings?.type !== 'granular' || settings.parameters.selectionStart !== 0 || settings.parameters.selectionEnd !== 0) {
-        throw new Error(`GRAIN ${entry.id}: sfx source must use the full new sample (selectionStart=0, selectionEnd=0)`);
-      }
       sfxKeywords.set(entry.id as number, entry.sfx_keyword.trim());
     } else if (!sampleCatalog.some(({ file }) => file === entry.sample)) {
       throw new Error(`GRAIN ${entry.id}: built_in source needs an available sample filename`);
     }
   }
   if (sfxKeywords.size !== 1) throw new Error('Image response must choose exactly one generated SFX layer');
+  for (const current of snapshot.modules) {
+    if (current.type !== 'bell') continue;
+    const setting = plan.modules.find((module) => module.id === current.id);
+    if (setting?.type === 'bell') {
+      setting.sequence = changedBellSequence(setting.sequence, current.sequence, setting.parameters.rootNote);
+    }
+  }
   return { description: root.description.trim(), mood: root.mood.trim(), composition: root.composition.trim(), plan, sfxKeywords, roles, sources };
 }

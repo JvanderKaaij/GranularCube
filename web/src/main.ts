@@ -114,9 +114,11 @@ async function applyPatchPlan(
   durationMs: number,
   onProgress: (progress: number) => void,
   generatedSamples: Map<number, { keyword: string; audioUrl: string }> = new Map(),
+  startImageModules = false,
 ): Promise<void> {
   const granularMorphs: Array<{ panel: GranularPanel; from: Parameters; to: Parameters }> = [];
   const bellMorphs: Array<{ panel: BellPanel; from: BellParameters; to: BellParameters; sequence: number[]; changeSequence: boolean }> = [];
+  const startedForImage: PatchPanel[] = [];
   for (const setting of plan.modules) {
     const panel = panels.get(setting.id);
     if (setting.type === 'granular') {
@@ -143,11 +145,33 @@ async function applyPatchPlan(
       });
     }
   }
+  if (startImageModules) {
+    try {
+      for (const morph of granularMorphs) {
+        if (morph.panel.engine.isPlaying) continue;
+        morph.from.gain = 0;
+        morph.panel.applyParameters(morph.from);
+        await morph.panel.start();
+        startedForImage.push(morph.panel);
+      }
+      for (const morph of bellMorphs) {
+        if (morph.panel.engine.isPlaying) continue;
+        morph.from.gain = 0;
+        morph.panel.applyParameters(morph.from);
+        await morph.panel.start();
+        startedForImage.push(morph.panel);
+      }
+    } catch (error) {
+      for (const panel of startedForImage) panel.stop();
+      throw error;
+    }
+  }
   const masterFrom = rack.currentParameters;
   const start = performance.now();
   const masterNode = document.querySelector<HTMLElement>('#master-node')!;
   for (const { panel } of [...granularMorphs, ...bellMorphs]) panel.root.classList.add('morphing');
   masterNode.classList.add('morphing');
+  let completed = false;
   try {
     await new Promise<void>((resolve, reject) => {
       let timer: number | null = null;
@@ -192,7 +216,9 @@ async function applyPatchPlan(
       };
       tick();
     });
+    completed = true;
   } finally {
+    if (!completed) for (const panel of startedForImage) panel.stop();
     for (const { panel } of [...granularMorphs, ...bellMorphs]) panel.root.classList.remove('morphing');
     masterNode.classList.remove('morphing');
     updatePatchState();
@@ -265,9 +291,10 @@ function addGranular(): number {
   return id;
 }
 
-function addBell(): void {
+function addBell(): number {
   const id = nextModuleId++;
   mountPanel(id, createBellPanel(id, rack.createBell(), removeModule, updatePatchState));
+  return id;
 }
 
 document.querySelector<HTMLButtonElement>('#add-module')!.addEventListener('click', addGranular);
@@ -291,17 +318,13 @@ for (const eventName of ['input', 'change']) {
 
 moodController = createMoodController(getPatchSnapshot, applyPatchPlan, {
   prepareImageLayers() {
-    const existing = [...panels.values()].filter((panel) => panel.kind === 'granular').length;
-    return Array.from({ length: Math.max(0, 3 - existing) }, () => addGranular());
+    const existingGrains = [...panels.values()].filter((panel) => panel.kind === 'granular').length;
+    const added = Array.from({ length: Math.max(0, 3 - existingGrains) }, () => addGranular());
+    if (![...panels.values()].some((panel) => panel.kind === 'bell')) added.push(addBell());
+    return added;
   },
   discardImageLayers(ids) {
     for (const id of ids) removeModule(id);
-  },
-  async startImageComposition(ids) {
-    for (const id of ids) {
-      const panel = panels.get(id);
-      if (panel && !panel.engine.isPlaying) await panel.start();
-    }
   },
 });
 document.querySelector<HTMLElement>('#mood-mount')!.append(moodController.root);

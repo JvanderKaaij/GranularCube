@@ -22,7 +22,6 @@ export interface MoodController {
 export interface ImageCompositionActions {
   prepareImageLayers(): number[];
   discardImageLayers(ids: number[]): void;
-  startImageComposition(ids: number[]): Promise<void>;
 }
 
 function sameModuleContext(before: PatchSnapshot, now: PatchSnapshot): boolean {
@@ -36,7 +35,7 @@ function sameModuleContext(before: PatchSnapshot, now: PatchSnapshot): boolean {
 
 export function createMoodController(
   getSnapshot: () => PatchSnapshot,
-  applyPlan: (plan: PatchPlan, durationMs: number, onProgress: (progress: number) => void, generatedSamples?: Map<number, { keyword: string; audioUrl: string }>) => Promise<void>,
+  applyPlan: (plan: PatchPlan, durationMs: number, onProgress: (progress: number) => void, generatedSamples?: Map<number, { keyword: string; audioUrl: string }>, startImageModules?: boolean) => Promise<void>,
   imageActions: ImageCompositionActions,
 ): MoodController {
   const root = document.createElement('section');
@@ -194,29 +193,18 @@ export function createMoodController(
         const percent = Math.round(progress * 100);
         progressBar.value = percent;
         progressValue.value = `${percent}%`;
-      }, generatedSamples);
+      }, generatedSamples, Boolean(imageResult));
       applied = true;
       if (imageResult) {
         prompt.value = imageResult.mood;
         scene.textContent = imageResult.description;
         composition.textContent = imageResult.composition;
       }
-      let playbackError: string | null = null;
-      if (imageResult) {
-        try {
-          await imageActions.startImageComposition(plan.modules.map((module) => module.id));
-        } catch (error) {
-          playbackError = error instanceof Error ? error.message : 'Audio could not start';
-        }
-      }
       lastResponse.textContent = JSON.stringify(imageResult
         ? { description: imageResult.description, mood: imageResult.mood, composition: imageResult.composition, ...plan, roles: Object.fromEntries(imageResult.roles), sources: Object.fromEntries(imageResult.sources), sfx_keywords: Object.fromEntries(imageResult.sfxKeywords) }
         : plan, null, 2);
       controller.updateOverview();
-      setStatus(playbackError
-        ? `Applied image scene, but audio could not start: ${playbackError}. Press PLAY on the modules.`
-        : `${mode === 'image' ? 'Applied image composition' : 'Applied mood'} to ${plan.modules.length} module${plan.modules.length === 1 ? '' : 's'}. ${mode === 'image' ? 'Layers are playing.' : 'New grains and strikes use these settings.'}`,
-      Boolean(playbackError));
+      setStatus(`${mode === 'image' ? 'Applied image composition' : 'Applied mood'} to ${plan.modules.length} module${plan.modules.length === 1 ? '' : 's'}. ${mode === 'image' ? 'Layers are playing.' : 'New grains and strikes use these settings.'}`);
     } catch (error) {
       if (!applied && addedImageLayers.length) imageActions.discardImageLayers(addedImageLayers);
       const message = error instanceof Error ? error.message : 'Request failed';

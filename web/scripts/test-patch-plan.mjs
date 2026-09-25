@@ -126,6 +126,20 @@ assert.equal(imagePlan.roles.get(3), 'soft sustained pad');
 assert.equal(imagePlan.sources.get(4), 'built_in');
 assert.equal(imagePlan.plan.modules[2].sample, 'choir_children.wav');
 assert.equal(imagePlan.plan.modules[0].parameters.selectionEnd, 0);
+const copiedBellPattern = parseImagePatchPlan(JSON.stringify({ ...imageResponse, modules: [
+  imageResponse.modules[0],
+  { ...imageResponse.modules[1], sequence: snapshot.modules[1].sequence },
+  ...imageResponse.modules.slice(2),
+] }), imageSnapshot);
+assert.notDeepEqual(copiedBellPattern.plan.modules[1].sequence, snapshot.modules[1].sequence);
+assert.equal(copiedBellPattern.plan.modules[1].sequence[0], snapshot.modules[1].sequence[0]);
+const looseSfxWindow = parseImagePatchPlan(JSON.stringify({ ...imageResponse, modules: [
+  { ...imageResponse.modules[0], sample: 'choir_children.wav', parameters: { ...imageResponse.modules[0].parameters, selectionStart: 25000, selectionEnd: 70000 } },
+  ...imageResponse.modules.slice(1),
+] }), imageSnapshot);
+assert.equal(looseSfxWindow.plan.modules[0].sample, 'violin.wav');
+assert.equal(looseSfxWindow.plan.modules[0].parameters.selectionStart, 0);
+assert.equal(looseSfxWindow.plan.modules[0].parameters.selectionEnd, 0);
 assert.match(buildImagePatchPrompt('make it tense', imageSnapshot), /make it tense/);
 assert.match(buildImagePatchPrompt('make it tense', imageSnapshot), /sfx_keyword/);
 assert.match(buildImagePatchPrompt('make it tense', imageSnapshot), /"mood"/);
