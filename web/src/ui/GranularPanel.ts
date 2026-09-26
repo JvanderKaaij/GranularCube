@@ -1,9 +1,11 @@
 import { GranularEngine } from '../audio/GranularEngine';
-import { granularControlGroups, type Parameters } from '../parameters';
+import { granularSourceGroups, type Parameters } from '../parameters';
 import type { GranularSnapshot } from '../ai/PatchPlan';
 import { sampleCatalog } from '../sampleCatalog';
-import { requestSoundEffect, SFX_URL } from '../ai/SfxClient';
+import { requestAvailableSamples, requestSoundEffect, SFX_URL } from '../ai/SfxClient';
 import { createRangeControl, type RangeControl } from './RangeControl';
+import { ParameterLfoControl } from './ParameterLfoControl';
+import type { ParameterLfoMap } from '../audio/ParameterLfo';
 
 function formatValue(value: number, unit = ''): string {
   const display = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
@@ -19,9 +21,18 @@ export interface GranularPanel {
   getSnapshot(): GranularSnapshot;
   applySample(sample: string, blendSeconds?: number): Promise<boolean>;
   applyGeneratedSample(keyword: string, audioUrl: string, blendSeconds?: number): Promise<boolean>;
+  preparePatchSample(sample: string, generated?: { keyword: string; audioUrl: string }, signal?: AbortSignal): Promise<PreparedPanelSample>;
   applyParameters(parameters: Parameters): void;
+  lfos: ParameterLfoMap;
   start(): Promise<void>;
   stop(): void;
+}
+
+export interface PreparedPanelSample {
+  changed: boolean;
+  durationMs: number;
+  validate(): void;
+  commit(blendSeconds: number): void;
 }
 
 export function createGranularPanel(
@@ -40,17 +51,17 @@ export function createGranularPanel(
       <div class="module-identity"><span class="module-icon">▦</span><div><span class="module-kicker">SYNTH / ${label}</span><h2>granular~</h2></div></div>
       <div class="module-actions"><span class="module-led" aria-hidden="true"></span><button class="icon-button remove-button" type="button" title="Remove ${label}" aria-label="Remove ${label}">×</button></div>
     </div>
-    <div class="module-flow"><span class="port input-port"></span><span>buffer~</span><span class="flow-arrow">→</span><span>poly~ ×64</span><span class="flow-arrow">→</span><span>filter~</span><span class="flow-arrow">→</span><span>cloud~</span><span class="port output-port" title="Audio output"></span></div>
+    <div class="module-flow"><span>GRAINS / STEREO</span><button type="button" class="port output-port" aria-label="Connect granular output">OUT</button></div>
     <div class="module-section sample-section">
       <div class="section-title"><span>01</span> SAMPLE SOURCE</div>
-      <div class="sample-line"><select class="sample-select" aria-label="${label} sample">${sampleCatalog.map(({ label: name, file }) => `<option value="${file}">${name}</option>`).join('')}</select><button class="mini-button browse-button" type="button" title="Open audio file">OPEN…</button><input class="file-input" type="file" accept="audio/*,.wav,.aiff,.aif,.mp3,.m4a" hidden /></div>
+      <div class="sample-line"><select class="sample-select" aria-label="${label} sample" disabled><option value="">Checking available samples…</option></select><button class="mini-button browse-button" type="button" title="Open audio file">OPEN…</button><input class="file-input" type="file" accept="audio/*,.wav,.aiff,.aif,.mp3,.m4a" hidden /></div>
       <details class="url-details"><summary>LOAD FROM URL</summary><div class="url-line"><input class="url-input" type="url" placeholder="https://…/sample.wav" aria-label="${label} sample URL" /><button class="mini-button url-button" type="button">LOAD</button></div></details>
       <form class="sfx-generator"><label for="sfx-word-${id}">AI SAMPLE / ELEVENLABS</label><div class="sfx-line"><input id="sfx-word-${id}" class="sfx-word" type="text" maxlength="80" placeholder="One word, e.g. rain" aria-label="${label} sound word" /><button class="mini-button sfx-button" type="submit">GENERATE</button></div><div class="sfx-status" role="status">Enter a word to create a sample.</div><div class="sfx-endpoint">POST ${SFX_URL}</div></form>
       <div class="sample-readout"><span class="sample-name">—</span><span class="sample-duration">—</span></div>
     </div>
     <div class="module-section transport-section"><button class="module-play" type="button" disabled>▶ <span>LOADING</span></button><span class="module-status" role="status">Preparing sample…</span></div>
     <div class="module-controls"></div>
-    <div class="module-foot"><span>OUT L / R</span><span>→ MASTER BUS</span></div>
+    <div class="module-foot"><span>OUT L / R</span><span>DRY SOURCE</span></div>
   `;
 
   const outputPort = root.querySelector<HTMLElement>('.output-port')!;
@@ -68,9 +79,14 @@ export function createGranularPanel(
   const controls = root.querySelector<HTMLElement>('.module-controls')!;
   let loadToken = 0;
   let currentSample = '';
+  let availableBuiltIns = new Set<string>();
   let customOption: HTMLOptionElement | null = null;
   let selectionRange: RangeControl | null = null;
   const rangeControls = new Map<string, RangeControl>();
+  const lfos: ParameterLfoMap = {};
+  const lfoControls: ParameterLfoControl[] = [];
+  const lfoByKey = new Map<string, ParameterLfoControl>();
+  const syncLfos = () => engine.setParameterLfos(lfos);
 
   function setStatus(message: string, error = false): void {
     status.textContent = message;
@@ -78,7 +94,7 @@ export function createGranularPanel(
   }
 
   function showSampleSelection(name: string): void {
-    if (sampleCatalog.some(({ file }) => file === name)) {
+    if (availableBuiltIns.has(name)) {
       customOption?.remove();
       customOption = null;
       sampleSelect.value = name;
@@ -129,20 +145,11 @@ export function createGranularPanel(
     }
   }
 
-  for (const [groupIndex, group] of granularControlGroups.entries()) {
+  for (const [groupIndex, group] of granularSourceGroups.entries()) {
     const block = document.createElement('section');
     block.className = 'parameter-block';
     block.innerHTML = `<div class="section-title"><span>${String(groupIndex + 2).padStart(2, '0')}</span> ${group.title.toUpperCase()}</div><div class="parameter-grid"></div>`;
     const grid = block.querySelector<HTMLElement>('.parameter-grid')!;
-    if (group.filterSelect) {
-      const row = document.createElement('label');
-      row.className = 'control select-control';
-      row.innerHTML = '<span class="control-label">FILTER MODE</span><select class="filter-select"><option value="lowpass">LOWPASS</option><option value="highpass">HIGHPASS</option><option value="bandpass">BANDPASS</option><option value="notch">NOTCH</option></select>';
-      row.querySelector<HTMLSelectElement>('select')!.addEventListener('change', (event) => {
-        engine.setParameter('filterType', (event.currentTarget as HTMLSelectElement).value as Parameters['filterType']);
-      });
-      grid.append(row);
-    }
     for (const definition of group.controls) {
       if (definition.kind === 'range') {
         const range = createRangeControl(
@@ -153,18 +160,37 @@ export function createGranularPanel(
           (lower, upper) => {
             engine.setParameter(definition.keys[0], lower);
             engine.setParameter(definition.keys[1], upper);
+            lfoByKey.get(definition.keys[0])?.setBase(lower);
+            lfoByKey.get(definition.keys[1])?.setBase(upper);
           },
         );
+        const [lowerInput, upperInput] = Array.from(range.root.querySelectorAll<HTMLInputElement>('input.range-thumb'));
+        const liveRangeValues: Record<string, number> = {
+          [definition.keys[0]]: Number(engine.currentParameters[definition.keys[0]]),
+          [definition.keys[1]]: Number(engine.currentParameters[definition.keys[1]]),
+        };
+        for (const [index, key] of definition.keys.entries()) {
+          const input = index === 0 ? lowerInput : upperInput;
+          input.dataset.param = key; input.min = String(definition.min); input.max = String(definition.max);
+          input.dataset.lfoManaged = 'true';
+          lfoControls.push(new ParameterLfoControl(range.root.querySelector<HTMLElement>('.range-heading')!, key, input, (settings) => { lfos[key] = settings; syncLfos(); }, (value) => formatValue(value, definition.unit), (value) => {
+            liveRangeValues[key] = value;
+            range.setDisplayValues(liveRangeValues[definition.keys[0]], liveRangeValues[definition.keys[1]]);
+          }));
+          lfoByKey.set(key, lfoControls[lfoControls.length - 1]);
+        }
         if (definition.keys[0] === 'selectionStart') selectionRange = range;
         rangeControls.set(definition.keys[0], range);
         grid.append(range.root);
         continue;
       }
-      const row = document.createElement('label');
+      const row = document.createElement('div');
       row.className = 'control';
       row.innerHTML = `<span class="control-heading"><span class="control-label">${definition.label.toUpperCase()}</span><output>${formatValue(engine.currentParameters[definition.key], definition.unit)}</output></span><input aria-label="${label} ${definition.label}" data-param="${definition.key}" type="range" min="${definition.min}" max="${definition.max}" step="${definition.step}" value="${engine.currentParameters[definition.key]}" />`;
       const input = row.querySelector<HTMLInputElement>('input')!;
       const output = row.querySelector<HTMLOutputElement>('output')!;
+      lfoControls.push(new ParameterLfoControl(row.querySelector<HTMLElement>('.control-heading')!, definition.key, input, (settings) => { lfos[definition.key] = settings; syncLfos(); }, (value) => formatValue(value, definition.unit)));
+      lfoByKey.set(definition.key, lfoControls[lfoControls.length - 1]);
       input.addEventListener('input', () => {
         const value = Number(input.value);
         engine.setParameter(definition.key, value);
@@ -257,9 +283,27 @@ export function createGranularPanel(
     }
   });
 
-  const initialSample = sampleCatalog[(id - 1) % sampleCatalog.length].file;
-  sampleSelect.value = initialSample;
-  void loadSample(initialSample, () => engine.loadSample(`/${encodeURIComponent(initialSample)}`));
+  async function initializeSamples(): Promise<void> {
+    try {
+      const available = new Set(await requestAvailableSamples());
+      const options = sampleCatalog.filter(({ file }) => available.has(file));
+      if (!options.length) throw new Error('No catalog samples are present in the server Samples folder.');
+      availableBuiltIns = new Set(options.map(({ file }) => file));
+      sampleSelect.replaceChildren(...options.map(({ file, label: name }) => {
+        const option = document.createElement('option'); option.value = file; option.textContent = name; return option;
+      }));
+      const initialSample = options[(id - 1) % options.length].file;
+      sampleSelect.value = initialSample;
+      sampleSelect.disabled = false;
+      await loadSample(initialSample, () => engine.loadSample(`/${encodeURIComponent(initialSample)}`));
+    } catch (error) {
+      sampleSelect.replaceChildren(new Option('No verified built-in samples', ''));
+      sampleSelect.disabled = true;
+      playButton.disabled = true;
+      setStatus(error instanceof Error ? error.message : 'Could not verify the server sample files.', true);
+    }
+  }
+  void initializeSamples();
 
   return {
     kind: 'granular',
@@ -267,6 +311,7 @@ export function createGranularPanel(
     outputPort,
     label,
     engine,
+    lfos,
     getSnapshot() {
       return {
         id,
@@ -280,7 +325,7 @@ export function createGranularPanel(
     },
     async applySample(sample, blendSeconds) {
       if (sample === currentSample && engine.sampleDurationMs > 0) return false;
-      if (!sampleCatalog.some(({ file }) => file === sample)) throw new Error(`${label}: unknown sample ${sample}`);
+      if (!availableBuiltIns.has(sample)) throw new Error(`${label}: sample is not present in the server Samples folder`);
       const loaded = await loadSample(sample, () => engine.loadSample(`/${encodeURIComponent(sample)}`, blendSeconds));
       if (!loaded) throw new Error(`${label}: could not load ${sample}`);
       return true;
@@ -293,27 +338,55 @@ export function createGranularPanel(
       sfxStatus.textContent = `Loaded “${keyword}” from the image.`;
       return true;
     },
+    async preparePatchSample(sample, generated, signal) {
+      const expectedToken = loadToken;
+      const expectedSample = currentSample;
+      const changed = Boolean(generated) || sample !== currentSample || engine.sampleDurationMs === 0;
+      if (!generated && !availableBuiltIns.has(sample) && changed) throw new Error(`${label}: sample is not present in the server Samples folder`);
+      const decoded = changed ? await engine.prepareSample(generated?.audioUrl ?? `/${encodeURIComponent(sample)}`, signal) : null;
+      const validate = () => {
+        signal?.throwIfAborted();
+        if (expectedToken !== loadToken || expectedSample !== currentSample) throw new Error(`${label}: sample changed while preparing the patch`);
+      };
+      validate();
+      return { changed, durationMs: decoded ? decoded.duration * 1000 : engine.sampleDurationMs, validate,
+        commit(blendSeconds) {
+          if (!decoded) return;
+          ++loadToken;
+          const durationMs = engine.commitSample(decoded, blendSeconds);
+          currentSample = generated ? `AI · ${generated.keyword}` : sample;
+          sampleName.textContent = currentSample;
+          showSampleSelection(currentSample);
+          updateSelection(durationMs);
+          playButton.disabled = false;
+          if (generated) {
+            sfxWord.value = generated.keyword;
+            sfxStatus.classList.remove('error');
+            sfxStatus.textContent = `Loaded “${generated.keyword}” from the painting.`;
+          }
+          setStatus(engine.isPlaying ? 'Running' : 'Ready');
+        } };
+    },
     applyParameters(parameters) {
-      for (const group of granularControlGroups) {
+      for (const group of granularSourceGroups) {
         for (const definition of group.controls) {
           if (definition.kind === 'range') {
             const range = rangeControls.get(definition.keys[0])!;
             range.setValues(parameters[definition.keys[0]], parameters[definition.keys[1]]);
             const [lower, upper] = range.getValues();
-            engine.setParameter(definition.keys[0], lower);
-            engine.setParameter(definition.keys[1], upper);
+          engine.setParameter(definition.keys[0], lower);
+          engine.setParameter(definition.keys[1], upper);
+          lfoByKey.get(definition.keys[0])?.setBase(lower); lfoByKey.get(definition.keys[1])?.setBase(upper);
           } else {
             const input = controls.querySelector<HTMLInputElement>(`[data-param="${definition.key}"]`)!;
             input.value = String(parameters[definition.key]);
             const value = Number(input.value);
             engine.setParameter(definition.key, value);
+            lfoByKey.get(definition.key)?.setBase(value);
             input.closest('.control')!.querySelector<HTMLOutputElement>('output')!.value = formatValue(value, definition.unit);
           }
         }
       }
-      const filterSelect = controls.querySelector<HTMLSelectElement>('.filter-select')!;
-      filterSelect.value = parameters.filterType;
-      engine.setParameter('filterType', parameters.filterType);
     },
     start,
     stop() {

@@ -1,12 +1,15 @@
 import {
-  bellControlGroups,
+  physicalControlGroups,
   granularControlGroups,
   masterControlDefinitions,
-  type BellParameters,
+  type PhysicalParameters,
   type MasterParameters,
   type Parameters,
 } from '../parameters';
 import { sampleCatalog } from '../sampleCatalog';
+import { effectControls, isSourceEffectParameter, type EffectSnapshot } from '../audio/EffectNode';
+import type { AudioConnection } from '../audio/AudioGraph';
+import { effectRouting, parseEffects, type EffectPlan } from './EffectPlan';
 
 export interface GranularSnapshot {
   id: number;
@@ -18,111 +21,114 @@ export interface GranularSnapshot {
   parameters: Parameters;
 }
 
-export interface BellSnapshot {
+export interface PhysicalSnapshot {
   id: number;
-  type: 'bell';
+  type: 'physical';
   label: string;
   playing: boolean;
-  parameters: BellParameters;
+  parameters: PhysicalParameters;
   sequence: number[];
 }
 
-export type ModuleSnapshot = GranularSnapshot | BellSnapshot;
+export type ModuleSnapshot = GranularSnapshot | PhysicalSnapshot;
 
 export interface PatchSnapshot {
   master: MasterParameters;
   modules: ModuleSnapshot[];
+  effects?: EffectSnapshot[];
+  connections?: AudioConnection[];
 }
 
 export type ModulePlan =
   | { id: number; type: 'granular'; sample: string; parameters: Parameters }
-  | { id: number; type: 'bell'; parameters: BellParameters; sequence: number[] };
+  | { id: number; type: 'physical'; parameters: PhysicalParameters; sequence: number[] };
 
 export interface PatchPlan {
   master: MasterParameters;
   modules: ModulePlan[];
+  effects?: EffectPlan[];
 }
 
-export interface ImagePatchPlan {
-  description: string;
-  mood: string;
-  composition: string;
-  plan: PatchPlan;
-  sfxKeywords: Map<number, string>;
-  roles: Map<number, string>;
-  sources: Map<number, 'sfx' | 'built_in'>;
-}
+const parameterMoodDescriptions: Record<string, string> = {
+  density: 'Higher values make a denser, more continuous texture; lower values create sparse, exposed events.',
+  lengthMin: 'Lower bound for grain duration; shorter grains sound crisp or fragmented, longer grains sustain and blur.',
+  lengthMax: 'Upper bound for grain duration; longer grains sound smoother and more sustained, shorter grains more pointed.',
+  ampMin: 'Quietest grain level; a higher floor makes the texture more even and present.',
+  ampMax: 'Loudest grain level; a wider amplitude range creates more dynamic, shifting textures.',
+  selectionStart: 'Beginning of the source region; moving it changes which moment or timbre is sampled.',
+  selectionEnd: 'End of the source region; a narrow window emphasizes a small detail, a wide window gives more variation.',
+  filterFreqMin: 'Low edge of randomized cutoff. Lower lowpass cutoffs darken the sound; lower highpass cutoffs retain more body. Bandpass/notch place the selected band.',
+  filterFreqMax: 'High edge of randomized cutoff. Higher lowpass cutoffs retain brightness; higher highpass cutoffs thin the sound. Wider min/max spans give more grain-to-grain timbral variation.',
+  filterQMin: 'Minimum filter resonance; higher values make the cutoff more pronounced or nasal.',
+  filterQMax: 'Maximum filter resonance; higher values add sharper, more colored resonant moments.',
+  filterType: 'Selects how the sound is shaped: low-pass darkens, high-pass thins, band-pass isolates a frequency region, and notch removes one. A gentle low-pass can soften a physical melodic line without losing its pitch.',
+  reverbMix: 'Wet/dry balance; more wetness places the sound farther away and blends it into space.',
+  reverbDecay: 'Reverb tail length; longer tails feel larger, more lingering, and more diffuse.',
+  reverbShimmer: 'Octave-up reverb layer; more shimmer adds airy, luminous harmonic lift.',
+  gain: 'Module loudness; use it to balance this voice against the others.',
+  reverbMixMaster: 'Shared wet/dry balance; more wetness places the whole patch farther into a common space.',
+  reverbDecayMaster: 'Shared reverb tail length; longer values make the complete patch feel larger and more lingering.',
+  rootNote: 'Physical pitch center; lower notes feel weightier and darker, higher notes lighter and brighter.',
+  rate: 'Physical sequence speed; faster strikes feel more active, slower strikes more spacious.',
+  decay: 'Physical ring length; longer values sustain and feel more resonant.',
+  softness: 'Mallet softness; softer strikes feel round and gentle, harder strikes sharper and more percussive.',
+  strikePosition: 'Where the physical is excited; changes which partials speak and therefore its character.',
+  noiseAmount: 'Noise in the attack; more adds breath, grit, or a noisy transient.',
+  noiseColor: 'Noise brightness; higher values sound brighter and sharper.',
+  noiseDecay: 'Noise attack duration; longer values make the noisy component linger.',
+  inharmonicity: 'Moves partials away from harmonic tuning toward metallic/bell or percussive modal tuning; string mode keeps harmonic partials.',
+  brightness: 'Strength of upper partials; higher values make the physical brighter and more cutting.',
+  damping: 'Attenuation of upper modes; more damping softens high frequencies and shortens their presence.',
+  beating: 'Detuning between paired modes; more beating adds wavering, shimmering motion.',
+  body: 'Low body resonance; higher values add weight and a deeper resonant component.',
+  spread: 'Stereo width; higher values distribute the physical more widely across the stereo field.',
+  filterCutoff: 'Physical filter cutoff; lower low-pass values darken and tuck the instrument behind other parts, while higher values preserve its attack and harmonic detail. High-pass, band-pass, and notch use the selected cutoff in their respective mode.',
+  filterResonance: 'Physical filter resonance; a modest peak emphasizes the cutoff for a more vocal or focused tone, while high resonance can ring and compete with the note.',
+  delayMix: 'Independent stereo echo return. Bell and string melodies always retain at least 0.55 level; alternate left/right repeats remain present even with cloud reverb. Let echoes carry a sparse motif between new strikes.',
+  delayTime: 'Spacing of successive left/right echoes. Bell/string uses 0.5–1.2 seconds; 0.7–0.9 seconds is a useful atmospheric starting point. Match the note gaps rather than flooding them with new notes.',
+  delayFeedback: 'Level passed to the next alternating echo. Bell/string keeps at least 0.58 so several repeats linger and soften; percussion can use less. For a spacious melody, slow its pattern rather than removing its echo trail.',
+  model: 'Bell emphasizes inharmonic metallic modes; Percussive body uses a short bright impact; Plucked string emphasizes harmonic partials and string-like decay.',
+};
 
-export const PATCH_SYSTEM_PROMPT = `You are a careful sound designer controlling a live browser audio patch. Turn the user's mood into coherent synthesizer settings that express that mood. Reply with exactly one JSON object matching the example in the user message: {"master":{...},"modules":[{"id":1,"type":"granular","sample":"violin.wav","parameters":{...}}]}. No prose, Markdown, code fences, new modules, or playback changes. Keep every existing module ID and type and provide a parameters object for each. Include every parameter key, using JSON numbers (not strings). For every granular module include a sample filename chosen from the available samples in the user message; you may keep its current sample. Match filenames exactly. Choose samples that suit the mood. Explicitly set the master reverb mix and decay and every module's reverb mix and decay; granular modules also need reverb shimmer. Shape these effects for the mood along with the synth settings. Stay within these bounds:
-Master: reverbMix 0–1; reverbDecay 0.5–6 seconds; gain 0–1.5.
-Granular: density 0.1–60; lengthMin/lengthMax 5–2000 ms; ampMin/ampMax 0–1; selectionStart/selectionEnd are milliseconds within the selected sample; filterFreqMin/filterFreqMax 20–20000 Hz; filterQMin/filterQMax 0.1–10; filterType one of lowpass, highpass, bandpass, notch; reverbMix 0–1; reverbDecay 1–12 seconds; reverbShimmer 0–1; gain 0–1. If choosing a different sample, set selectionStart=0 and selectionEnd=0 to use its full duration; the patch will fill this in after loading.
-Bell: rootNote integer MIDI 48–84; rate 0.2–3 strikes/second; decay 0.5–10 seconds; softness, noiseAmount, noiseColor, inharmonicity, brightness, damping, beating, body, and spread each 0–1; strikePosition 0.05–0.95; noiseDecay 0.02–0.8 seconds; reverbMix 0–1; reverbDecay 1–12 seconds; gain 0–1. The bell is a struck modal resonator: softness controls the mallet; noiseAmount/noiseColor/noiseDecay create an audible noisy attack or texture; strikePosition changes which modes are excited; inharmonicity moves between harmonic and bell-like partials; brightness raises high partials; damping shortens their ring; beating detunes paired modes; body adds a lower resonance. Choose these values deliberately for the mood. For each bell module, also include a sequence array of 4–16 integer semitone offsets from its rootNote, played in order (for example [0,7,12,4,9,2,7,14]). Each offset must be -12–24 and rootNote + offset must be MIDI 48–96. Compose the sequence to suit the mood. Do not add sequence to granular modules.
-For every Min/Max pair, Min must be no greater than Max. Use modest output levels and avoid abrupt loud jumps. Preserve whether each module is playing. Most granular samples lack verified pitch; do not claim exact note matching with the bell.`;
-
-export function buildMoodPrompt(mood: string, snapshot: PatchSnapshot): string {
-  const example: PatchPlan = {
-    master: snapshot.master,
-    modules: snapshot.modules.map((module) => module.type === 'bell'
-      ? { id: module.id, type: 'bell', parameters: module.parameters, sequence: module.sequence }
-      : { id: module.id, type: 'granular', sample: module.sample, parameters: module.parameters }),
-  };
-  return `Mood: ${mood.trim()}\n\nAvailable built-in samples (choose the exact file value for each granular module):\n${JSON.stringify(sampleCatalog, null, 2)}\n\nCurrent patch settings and sample context:\n${JSON.stringify(snapshot, null, 2)}\n\nExample of the required response format (replace values to suit the mood; retain IDs, types, and parameter keys, choose samples, and compose a bell sequence when present):\n${JSON.stringify(example, null, 2)}`;
-}
-
-export const IMAGE_PATCH_SYSTEM_PROMPT = `${PATCH_SYSTEM_PROMPT}\nFor an image request, also return top-level \"description\" (one factual sentence about visible content), \"mood\" (concise musical intention), and \"composition\" (one or two sentences explaining how the layers relate). Give EVERY module a short \"role\" (such as recognizable scene sound, sustained pad, rhythmic pulse, lead, percussion, or bell accents). Every granular module also needs \"source\": either \"sfx\" or \"built_in\". Choose EXACTLY ONE granular module with source \"sfx\" and give it a short \"sfx_keyword\" describing an audible object or plausible action in the image. It generates one recognizable sound effect. Its sample field should remain its current filename as a placeholder, and selectionStart=0 and selectionEnd=0. ALL other granular modules must have source \"built_in\" and choose exact filenames from the available built-in sample catalog; do not give them an sfx_keyword. You can turn an existing sustained sample into a pad with longer overlapping grains, or an existing transient/instrument sample into a lead or percussive line with shorter, sparser grains. Aim for distinct complementary roles; use a built-in pad and a built-in lead or rhythmic/percussive part when enough granular modules exist. If choosing a different built-in sample, set selectionStart=0 and selectionEnd=0. Use bell modules as complementary struck notes or accents. Compose a fresh sequence for each bell that differs from its current sequence and fits the scene mood. Make the synth's rhythm, density, timbre, filter, notes, and all module and master FX support the scene sound so the music and SFX feel connected to the events and atmosphere in the image. Prioritize visible sound sources over generic mood words. Do not invent motion or sound that the still image does not support. The application starts idle image-composition modules at zero level and fades them in while settings transition, so set levels suitable for simultaneous playback.`;
-
-function changedBellSequence(sequence: number[], current: number[], rootNote: number): number[] {
-  if (sequence.length !== current.length || sequence.some((note, index) => note !== current[index])) return sequence;
-  const rotated = [sequence[0], ...sequence.slice(2), sequence[1]];
-  if (rotated.some((note, index) => note !== sequence[index])) return rotated;
-  const replacement = [2, -2, 1, -1]
-    .map((step) => sequence[1] + step)
-    .find((note) => note >= -12 && note <= 24 && rootNote + note >= 48 && rootNote + note <= 96);
-  if (replacement === undefined) return sequence;
-  return [sequence[0], replacement, ...sequence.slice(2)];
-}
-
-export function buildImagePatchPrompt(direction: string, snapshot: PatchSnapshot): string {
-  const firstGranularId = snapshot.modules.find((module) => module.type === 'granular')?.id;
-  let builtInExampleIndex = 0;
-  const exampleModules = snapshot.modules.map((module) => {
-    if (module.type === 'bell') {
-      return { id: module.id, type: 'bell', role: 'sparse melodic accents', parameters: module.parameters, sequence: changedBellSequence(module.sequence, module.sequence, module.parameters.rootNote) };
-    }
-    if (module.id === firstGranularId) {
-      return { id: module.id, type: 'granular', role: 'recognizable scene sound', source: 'sfx', sample: module.sample, sfx_keyword: 'visible sound source', parameters: { ...module.parameters, selectionStart: 0, selectionEnd: 0 } };
-    }
-    const isPad = builtInExampleIndex++ % 2 === 0;
-    return {
-      id: module.id, type: 'granular', role: isPad ? 'sustained pad' : 'sparse percussion',
-      source: 'built_in', sample: isPad ? 'choir_children.wav' : 'egg_shaker.wav',
-      parameters: {
-        ...module.parameters,
-        density: isPad ? 12 : 2.5,
-        lengthMin: isPad ? 380 : 35,
-        lengthMax: isPad ? 800 : 90,
-        ampMin: isPad ? 0.1 : 0.2,
-        ampMax: isPad ? 0.3 : 0.45,
-        selectionStart: 0, selectionEnd: 0,
-        reverbMix: isPad ? 0.5 : 0.2,
-        gain: isPad ? 0.16 : 0.12,
-      },
-    };
-  });
-  const example = {
-    description: 'A concise description of the visible scene and likely sound sources.',
-    mood: 'A short musical intention drawn from the image.',
-    composition: 'The recognizable scene sound sits above a soft built-in sample pad and a sparse built-in rhythmic or lead layer; bell strikes add accents.',
-    master: snapshot.master,
-    modules: exampleModules,
-  };
-  const roster = snapshot.modules.map((module) => ({
-    id: module.id,
-    instrument: module.type,
-    playing: module.playing,
-    ...(module.type === 'granular' ? { currentSample: module.sample } : { currentSequence: module.sequence }),
+export function buildParameterContext(snapshot: PatchSnapshot): object {
+  const modular = snapshot.effects !== undefined;
+  const granular = granularControlGroups.flatMap((group) => group.controls.flatMap((control) => {
+    const keys = control.kind === 'range' ? control.keys : [control.key];
+    return keys.map((key) => ({
+      key,
+      min: control.min,
+      max: control.kind === 'range' && control.keys[0] === 'selectionStart' ? 'selected sample duration; see perModuleWindows' : control.max,
+      unit: control.unit?.trim() ?? 'unitless',
+      step: control.step,
+      moodEffect: parameterMoodDescriptions[key],
+    }));
   }));
-  return `Direction: ${direction.trim() || 'Translate the visible scene into a connected soundscape.'}\n\nCompose for the instruments actually present in the patch. Granular modules can play sustained pads with overlapping grains or rhythmic, lead, and percussive parts with shorter, separated grains. Choir and sustained instruments are candidates for pads; shaker and drums for percussion; clarinet, flute, piano, and other instrument samples for lead gestures. The bell module plays a sequence of struck physical-modeling notes; choose a new pattern that expresses the image mood. Use the catalog's note metadata only where it is given; other sample pitches are unknown. Make one generated SFX recognizable and relevant to something visible, then connect the musical layers to that sound and to one another. The layer roles should be audible in the chosen sample, density, grain length, filter, level, and FX settings.\n\nInstruments to compose for (keep these IDs and types):\n${JSON.stringify(roster, null, 2)}\n\nAvailable built-in samples (choose exact file values for every built_in granular source):\n${JSON.stringify(sampleCatalog, null, 2)}\n\nCurrent patch settings and sample context:\n${JSON.stringify(snapshot, null, 2)}\n\nRequired response example (replace the description, mood, composition, roles, sources, sample choices, settings, and bell sequences to fit the image; retain IDs and types):\n${JSON.stringify(example, null, 2)}`;
+  const physicals = physicalControlGroups.flatMap((group) => group.controls.map((control) => ({
+    key: control.key,
+    min: control.min, max: control.max, unit: control.unit?.trim() ?? (control.key === 'rootNote' ? 'MIDI note' : 'unitless'),
+    step: control.step,
+    moodEffect: parameterMoodDescriptions[control.key],
+  })));
+  const master = masterControlDefinitions.map((control) => ({
+    key: control.key,
+    min: control.min, max: control.max, unit: control.unit?.trim() ?? 'unitless',
+    step: control.step,
+    moodEffect: parameterMoodDescriptions[`${control.key}Master`] ?? parameterMoodDescriptions[control.key],
+  }));
+  return {
+    master: modular ? master.filter((control) => control.key === 'gain') : master,
+    granular: modular ? granular.filter((control) => !isSourceEffectParameter(control.key)) : granular,
+    granularDiscrete: modular ? [] : [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }],
+    physical: modular ? physicals.filter((control) => !isSourceEffectParameter(control.key)) : physicals,
+    physicalDiscrete: [
+      { key: 'model', allowed: ['bell', 'percussion', 'string'], moodEffect: parameterMoodDescriptions.model },
+      ...(!modular ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : []),
+    ],
+    effects: modular ? effectRouting(snapshot).map((effect) => ({ ...effect, controls: effectControls[effect.type], discrete: effect.type === 'filter' ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : [] })) : undefined,
+    connections: snapshot.connections,
+    perModuleWindows: snapshot.modules.flatMap((m) => m.type === 'granular' ? [{ id: m.id, currentSample: m.sample, min: 0, max: Math.ceil(m.sampleDurationMs), unit: 'ms', newSample: 'Set selectionStart=selectionEnd=0 until the new sample is decoded' }] : []),
+    interpretation: 'Ranges are inclusive. For every parameter, choose a value inside its range and on its step. Min/max pairs must be ordered.',
+  };
 }
 
 function record(value: unknown, path: string): Record<string, unknown> {
@@ -144,9 +150,9 @@ function requireFields(raw: Record<string, unknown>, keys: string[], path: strin
   }
 }
 
-function parseMaster(value: unknown, current: MasterParameters): MasterParameters {
+function parseMaster(value: unknown, current: MasterParameters, modular = false): MasterParameters {
   const raw = record(value, 'master');
-  requireFields(raw, ['reverbMix', 'reverbDecay'], 'master');
+  requireFields(raw, modular ? ['gain'] : ['reverbMix', 'reverbDecay'], 'master');
   const result = { ...current };
   for (const control of masterControlDefinitions) {
     result[control.key] = numberInRange(raw[control.key], current[control.key], control.min, control.max, control.step, `master.${control.key}`);
@@ -154,9 +160,9 @@ function parseMaster(value: unknown, current: MasterParameters): MasterParameter
   return result;
 }
 
-function parseGranular(value: unknown, current: GranularSnapshot, selectedSample: string): Parameters {
+function parseGranular(value: unknown, current: GranularSnapshot, selectedSample: string, modular = false): Parameters {
   const raw = record(value, `${current.label}.parameters`);
-  requireFields(raw, ['reverbMix', 'reverbDecay', 'reverbShimmer'], `${current.label}.parameters`);
+  if (!modular) requireFields(raw, ['reverbMix', 'reverbDecay', 'reverbShimmer'], `${current.label}.parameters`);
   const result = { ...current.parameters };
   for (const group of granularControlGroups) {
     for (const control of group.controls) {
@@ -182,11 +188,17 @@ function parseGranular(value: unknown, current: GranularSnapshot, selectedSample
   return result;
 }
 
-function parseBell(value: unknown, current: BellSnapshot): BellParameters {
+function parsePhysical(value: unknown, current: PhysicalSnapshot, modular = false): PhysicalParameters {
   const raw = record(value, `${current.label}.parameters`);
-  requireFields(raw, bellControlGroups.flatMap((group) => group.controls.map((control) => control.key)), `${current.label}.parameters`);
+  requireFields(raw, ['model', ...(!modular ? ['filterType'] : []), ...physicalControlGroups.flatMap((group) => group.controls.map((control) => control.key)).filter((key) => !modular || !isSourceEffectParameter(key))], `${current.label}.parameters`);
   const result = { ...current.parameters };
-  for (const group of bellControlGroups) {
+  if (!['bell', 'percussion', 'string'].includes(String(raw.model))) throw new Error(`${current.label}.model must be bell, percussion, or string`);
+  result.model = raw.model as PhysicalParameters['model'];
+  if (!modular || raw.filterType !== undefined) {
+    if (!['lowpass', 'highpass', 'bandpass', 'notch'].includes(String(raw.filterType))) throw new Error(`${current.label}.filterType must be lowpass, highpass, bandpass, or notch`);
+    result.filterType = raw.filterType as PhysicalParameters['filterType'];
+  }
+  for (const group of physicalControlGroups) {
     for (const control of group.controls) {
       result[control.key] = numberInRange(raw[control.key], current.parameters[control.key], control.min, control.max, control.step, `${current.label}.${control.key}`);
     }
@@ -194,7 +206,7 @@ function parseBell(value: unknown, current: BellSnapshot): BellParameters {
   return result;
 }
 
-function parseBellSequence(value: unknown, rootNote: number, label: string): number[] {
+export function parsePhysicalSequence(value: unknown, rootNote: number, label: string): number[] {
   if (!Array.isArray(value) || value.length < 4 || value.length > 16) {
     throw new Error(`${label}.sequence must contain 4–16 note offsets`);
   }
@@ -214,7 +226,8 @@ export function parsePatchPlan(responseText: string, snapshot: PatchSnapshot): P
   if (!Array.isArray(root.modules)) throw new Error('response.modules must be an array');
   if (root.modules.length !== snapshot.modules.length) throw new Error('API response must include every current module exactly once');
 
-  const master = parseMaster(root.master, snapshot.master);
+  const modular = snapshot.effects !== undefined;
+  const master = parseMaster(root.master, snapshot.master, modular);
   const byId = new Map<number, Record<string, unknown>>();
   for (const item of root.modules) {
     const module = record(item, 'module');
@@ -229,72 +242,10 @@ export function parsePatchPlan(responseText: string, snapshot: PatchSnapshot): P
         (module.sample !== current.sample && !sampleCatalog.some(({ file }) => file === module.sample))) {
         throw new Error(`${current.label}.sample must be an available sample filename`);
       }
-      return { id: current.id, type: 'granular', sample: module.sample, parameters: parseGranular(module.parameters, current, module.sample) };
+      return { id: current.id, type: 'granular', sample: module.sample, parameters: parseGranular(module.parameters, current, module.sample, modular) };
     }
-    const parameters = parseBell(module.parameters, current);
-    return { id: current.id, type: 'bell', parameters, sequence: parseBellSequence(module.sequence, parameters.rootNote, current.label) };
+    const parameters = parsePhysical(module.parameters, current, modular);
+    return { id: current.id, type: 'physical', parameters, sequence: parsePhysicalSequence(module.sequence, parameters.rootNote, current.label) };
   });
-  return { master, modules };
-}
-
-export function parseImagePatchPlan(responseText: string, snapshot: PatchSnapshot): ImagePatchPlan {
-  const text = responseText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { throw new Error('Image API response is not valid JSON'); }
-  const root = record(parsed, 'image response');
-  if (typeof root.description !== 'string' || !root.description.trim() || root.description.length > 600) {
-    throw new Error('Image response needs a short scene description');
-  }
-  if (typeof root.mood !== 'string' || !root.mood.trim() || root.mood.length > 300) {
-    throw new Error('Image response needs a short musical mood');
-  }
-  if (typeof root.composition !== 'string' || !root.composition.trim() || root.composition.length > 500) {
-    throw new Error('Image response needs a short composition description');
-  }
-  if (!Array.isArray(root.modules)) throw new Error('image response.modules must be an array');
-  const modules = root.modules as unknown[];
-  const normalizedModules = modules.map((module) => {
-    const entry = record(module, 'image module');
-    if (entry.type !== 'granular' || entry.source !== 'sfx') return entry;
-    const current = snapshot.modules.find((item) => item.id === entry.id);
-    const parameters = record(entry.parameters, `GRAIN ${entry.id}.parameters`);
-    return {
-      ...entry,
-      sample: current?.type === 'granular' ? current.sample : entry.sample,
-      parameters: { ...parameters, selectionStart: 0, selectionEnd: 0 },
-    };
-  });
-  const plan = parsePatchPlan(JSON.stringify({ ...root, modules: normalizedModules }), snapshot);
-  const sfxKeywords = new Map<number, string>();
-  const roles = new Map<number, string>();
-  const sources = new Map<number, 'sfx' | 'built_in'>();
-  for (const module of modules) {
-    const entry = record(module, 'image module');
-    if (typeof entry.role !== 'string' || !entry.role.trim() || entry.role.length > 100) {
-      throw new Error(`Module ${entry.id}: role must be a short musical purpose`);
-    }
-    roles.set(entry.id as number, entry.role.trim());
-    if (entry.type !== 'granular') continue;
-    if (entry.source !== 'sfx' && entry.source !== 'built_in') {
-      throw new Error(`GRAIN ${entry.id}: source must be sfx or built_in`);
-    }
-    sources.set(entry.id as number, entry.source);
-    if (entry.source === 'sfx') {
-      if (typeof entry.sfx_keyword !== 'string' || !entry.sfx_keyword.trim() || entry.sfx_keyword.length > 80) {
-        throw new Error(`GRAIN ${entry.id}: sfx_keyword must be a short sound phrase`);
-      }
-      sfxKeywords.set(entry.id as number, entry.sfx_keyword.trim());
-    } else if (!sampleCatalog.some(({ file }) => file === entry.sample)) {
-      throw new Error(`GRAIN ${entry.id}: built_in source needs an available sample filename`);
-    }
-  }
-  if (sfxKeywords.size !== 1) throw new Error('Image response must choose exactly one generated SFX layer');
-  for (const current of snapshot.modules) {
-    if (current.type !== 'bell') continue;
-    const setting = plan.modules.find((module) => module.id === current.id);
-    if (setting?.type === 'bell') {
-      setting.sequence = changedBellSequence(setting.sequence, current.sequence, setting.parameters.rootNote);
-    }
-  }
-  return { description: root.description.trim(), mood: root.mood.trim(), composition: root.composition.trim(), plan, sfxKeywords, roles, sources };
+  return { master, modules, ...(modular ? { effects: parseEffects(root.effects, snapshot) } : {}) };
 }

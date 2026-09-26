@@ -25,7 +25,13 @@ export interface MasterParameters {
   gain: number;
 }
 
-export interface BellParameters {
+export type PhysicalModel = 'bell' | 'percussion' | 'string';
+
+export interface PhysicalParameters {
+  model: PhysicalModel;
+  filterType: FilterType;
+  filterCutoff: number;
+  filterResonance: number;
   rootNote: number;
   rate: number;
   decay: number;
@@ -40,6 +46,9 @@ export interface BellParameters {
   beating: number;
   body: number;
   spread: number;
+  delayMix: number;
+  delayTime: number;
+  delayFeedback: number;
   reverbMix: number;
   reverbDecay: number;
   gain: number;
@@ -70,10 +79,14 @@ export const masterDefaults: MasterParameters = {
   gain: 1,
 };
 
-export const bellDefaults: BellParameters = {
+export const physicalDefaults: PhysicalParameters = {
+  model: 'bell',
+  filterType: 'lowpass',
+  filterCutoff: 12000,
+  filterResonance: 0.7,
   rootNote: 60,
   rate: 0.8,
-  decay: 5,
+  decay: 2.4,
   softness: 0.75,
   strikePosition: 0.28,
   noiseAmount: 0.22,
@@ -85,6 +98,9 @@ export const bellDefaults: BellParameters = {
   beating: 0.08,
   body: 0.2,
   spread: 0.35,
+  delayMix: 0.62,
+  delayTime: 0.75,
+  delayFeedback: 0.65,
   reverbMix: 0.25,
   reverbDecay: 6,
   gain: 0.28,
@@ -117,8 +133,8 @@ export interface RangeControlDefinition {
 
 export type ControlDefinition = SingleControlDefinition | RangeControlDefinition;
 
-export interface BellControlDefinition {
-  key: keyof BellParameters;
+export interface PhysicalControlDefinition {
+  key: Exclude<keyof PhysicalParameters, 'model' | 'filterType'>;
   label: string;
   min: number;
   max: number;
@@ -180,7 +196,14 @@ export const granularControlGroups: { title: string; controls: ControlDefinition
   },
 ];
 
-export const bellControlGroups: { title: string; controls: BellControlDefinition[] }[] = [
+export const physicalControlGroups: { title: string; controls: PhysicalControlDefinition[] }[] = [
+  {
+    title: 'Tone filter',
+    controls: [
+      { key: 'filterCutoff', label: 'Cutoff', min: 40, max: 20000, step: 1, unit: 'Hz' },
+      { key: 'filterResonance', label: 'Resonance', min: 0.1, max: 12, step: 0.1, unit: 'Q' },
+    ],
+  },
   {
     title: 'Pitch / pattern',
     controls: [
@@ -211,6 +234,14 @@ export const bellControlGroups: { title: string; controls: BellControlDefinition
     ],
   },
   {
+    title: 'Melodic delay',
+    controls: [
+      { key: 'delayMix', label: 'Echo level', min: 0, max: 0.8, step: 0.01 },
+      { key: 'delayTime', label: 'Echo spacing', min: 0.05, max: 1.5, step: 0.01, unit: 's' },
+      { key: 'delayFeedback', label: 'Repeat amount', min: 0, max: 0.78, step: 0.01 },
+    ],
+  },
+  {
     title: 'Cloud reverb',
     controls: [
       { key: 'reverbMix', label: 'Wet / dry', min: 0, max: 1, step: 0.01 },
@@ -224,3 +255,7 @@ export const bellControlGroups: { title: string; controls: BellControlDefinition
     ],
   },
 ];
+
+/** Source panels expose synthesis only; effects live in graph nodes. */
+export const granularSourceGroups = granularControlGroups.filter(group => !['Filter', 'Cloud / shimmer'].includes(group.title));
+export const physicalSourceGroups = physicalControlGroups.filter(group => !['Tone filter', 'Melodic delay', 'Cloud reverb'].includes(group.title));

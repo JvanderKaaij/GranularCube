@@ -1,5 +1,6 @@
-import { bellDefaults, type BellParameters } from '../parameters';
-import { CloudReverb } from './CloudReverb';
+import { physicalDefaults, type PhysicalParameters } from '../parameters';
+import { AmbientMotion, type Movement } from './AmbientMotion';
+import type { ParameterLfoMap } from './ParameterLfo';
 
 const SCHEDULER_INTERVAL_MS = 25;
 const LOOK_AHEAD_SECONDS = 0.12;
@@ -14,8 +15,9 @@ const MODES = [
   { ratio: 5.43, amplitude: 0.06, decay: 0.24 },
   { ratio: 6.79, amplitude: 0.035, decay: 0.19 },
 ];
+const PERCUSSION_RATIOS = [1, 1.57, 2.31, 3.18, 4.42, 5.83, 7.61];
 
-interface BellVoice {
+interface PhysicalVoice {
   sources: Set<AudioScheduledSourceNode>;
   panner: StereoPannerNode;
 }
@@ -31,17 +33,16 @@ function makeMalletNoise(context: AudioContext): AudioBuffer {
   return buffer;
 }
 
-/** A struck modal resonator with position-dependent excitation, noise, and tunable modes. */
-export class BellEngine {
+/** A physical-style modal resonator with bell, percussive-body, and plucked-string modes. */
+export class PhysicalEngine {
   private readonly context: AudioContext;
   private readonly output: GainNode;
-  private readonly cloud: CloudReverb;
   private readonly malletNoise: AudioBuffer;
-  private readonly voices = new Set<BellVoice>();
-  private parameters: BellParameters = { ...bellDefaults };
+  private readonly voices = new Set<PhysicalVoice>();
+  private parameters: PhysicalParameters = { ...physicalDefaults };
+  private readonly motion = new AmbientMotion(Math.random() * 20);
   private sequence = [...DEFAULT_SEQUENCE];
   private timer: number | null = null;
-  private decayTimer: number | null = null;
   private nextStrikeTime = 0;
   private stepIndex = 0;
   private playing = false;
@@ -51,39 +52,25 @@ export class BellEngine {
     this.output = context.createGain();
     this.output.gain.value = this.parameters.gain;
     this.output.connect(destination);
-    this.cloud = new CloudReverb(context, this.output, this.parameters.reverbMix, this.parameters.reverbDecay, 0);
     this.malletNoise = makeMalletNoise(context);
   }
 
   get isPlaying(): boolean { return this.playing; }
-  get currentParameters(): BellParameters { return { ...this.parameters }; }
+  get currentParameters(): PhysicalParameters { return { ...this.parameters }; }
   get currentSequence(): number[] { return [...this.sequence]; }
+  setMovement(movement: Movement | null): void { this.motion.set(movement, this.context.currentTime); }
+  setMotionEnabled(enabled: boolean): void { this.motion.enabled = enabled; }
+  setParameterLfos(settings: ParameterLfoMap): void { this.motion.setParameterLfos(settings); }
 
   setSequence(sequence: number[]): void {
-    if (sequence.length === 0) throw new Error('Bell sequence must contain notes');
+    if (sequence.length === 0) throw new Error('Physical sequence must contain notes');
     this.sequence = [...sequence];
     this.stepIndex = 0;
   }
 
-  setParameter<K extends keyof BellParameters>(key: K, value: BellParameters[K]): void {
+  setParameter<K extends keyof PhysicalParameters>(key: K, value: PhysicalParameters[K]): void {
     this.parameters[key] = value;
-    if (key === 'gain') {
-      this.output.gain.setTargetAtTime(this.parameters.gain, this.context.currentTime, 0.02);
-    } else if (key === 'reverbMix') {
-      this.cloud.setMix(this.parameters.reverbMix);
-    } else if (key === 'reverbDecay') {
-      if (this.decayTimer !== null) window.clearTimeout(this.decayTimer);
-      this.decayTimer = window.setTimeout(() => {
-        this.cloud.setDecay(this.parameters.reverbDecay);
-        this.decayTimer = null;
-      }, 180);
-    }
-  }
-
-  transitionReverbDecay(seconds: number, fadeSeconds: number): void {
-    if (this.decayTimer !== null) window.clearTimeout(this.decayTimer);
-    this.decayTimer = null;
-    this.cloud.setDecay(seconds, fadeSeconds);
+    if (key === 'gain') this.output.gain.setTargetAtTime(this.parameters.gain, this.context.currentTime, 0.02);
   }
 
   async start(): Promise<void> {
@@ -114,8 +101,6 @@ export class BellEngine {
 
   dispose(): void {
     this.stop();
-    if (this.decayTimer !== null) window.clearTimeout(this.decayTimer);
-    this.cloud.dispose();
     this.output.disconnect();
   }
 
@@ -129,7 +114,7 @@ export class BellEngine {
         const velocity = 0.62 + Math.random() * 0.2;
         this.scheduleStrike(this.nextStrikeTime, note, velocity);
       }
-      this.nextStrikeTime += 1 / Math.max(0.2, this.parameters.rate);
+      this.nextStrikeTime += 1 / Math.max(0.2, this.motion.physical(this.parameters, this.nextStrikeTime).rate);
       this.stepIndex++;
       scheduled++;
     }
@@ -139,12 +124,13 @@ export class BellEngine {
   private scheduleStrike(time: number, midiNote: number, velocity: number): void {
     if (this.voices.size >= MAX_ACTIVE_STRIKES) return;
     const context = this.context;
-    const p = this.parameters;
+    const p = this.motion.physical(this.parameters, time);
+    this.output.gain.setTargetAtTime(p.gain, Math.max(context.currentTime, time), 0.08);
     const frequency = noteFrequency(midiNote);
     const panner = context.createStereoPanner();
     panner.pan.value = Math.sin(this.stepIndex * 2.4) * p.spread * 0.7;
-    panner.connect(this.cloud.input);
-    const voice: BellVoice = { sources: new Set(), panner };
+    panner.connect(this.output);
+    const voice: PhysicalVoice = { sources: new Set(), panner };
     this.voices.add(voice);
 
     const track = (source: AudioScheduledSourceNode, nodes: AudioNode[]): void => {
@@ -160,7 +146,7 @@ export class BellEngine {
       };
     };
 
-    const attack = 0.002 + p.softness * 0.028;
+    const attack = p.model === 'percussion' ? 0.001 + p.softness * 0.012 : 0.002 + p.softness * 0.028;
     const addTone = (toneFrequency: number, peak: number, end: number, detune = 0): void => {
       const oscillator = context.createOscillator();
       oscillator.type = 'sine';
@@ -178,17 +164,20 @@ export class BellEngine {
 
     for (const [index, mode] of MODES.entries()) {
       const harmonicRatio = index + 1;
-      const modeFrequency = frequency * (harmonicRatio + (mode.ratio - harmonicRatio) * p.inharmonicity);
+      const modelRatio = p.model === 'string' ? harmonicRatio : p.model === 'percussion' ? PERCUSSION_RATIOS[index] : mode.ratio;
+      const modeAmplitude = p.model === 'string' ? 1 / (index + 1) : p.model === 'percussion' ? [1, 0.72, 0.55, 0.42, 0.32, 0.24, 0.18][index] : mode.amplitude;
+      const modeDecay = p.model === 'string' ? 1 : p.model === 'percussion' ? [1, 0.68, 0.48, 0.34, 0.24, 0.18, 0.13][index] : mode.decay;
+      const modeFrequency = frequency * (harmonicRatio + (modelRatio - harmonicRatio) * p.inharmonicity);
       if (modeFrequency >= context.sampleRate * 0.45) continue;
       const positionResponse = Math.abs(Math.sin(Math.PI * harmonicRatio * p.strikePosition));
       const positionNormalizer = Math.max(0.35, Math.sin(Math.PI * p.strikePosition));
       const strikeWeight = Math.min(1.5, positionResponse / positionNormalizer);
       const brightnessWeight = (0.25 + 1.25 * p.brightness) ** (index / 3);
       const highModeSoftening = 1 - p.softness * (index / (MODES.length - 1)) * 0.86;
-      const peak = 0.24 * velocity * mode.amplitude * strikeWeight * brightnessWeight * highModeSoftening;
+      const peak = 0.24 * velocity * modeAmplitude * strikeWeight * brightnessWeight * highModeSoftening;
       if (peak < 0.0002) continue;
       const damping = Math.max(0.12, 1 - p.damping * (index / (MODES.length - 1)) * 0.88);
-      const end = time + Math.max(0.16, p.decay * mode.decay * damping);
+      const end = time + Math.max(0.045, p.decay * modeDecay * damping * (p.model === 'percussion' ? 0.42 : 1));
       addTone(modeFrequency, peak * (1 - p.beating * 0.25), end);
       if (p.beating > 0.01) addTone(modeFrequency, peak * p.beating * 0.25, end, 3 + 22 * p.beating);
     }
@@ -206,7 +195,7 @@ export class BellEngine {
       const noiseEnvelope = context.createGain();
       const noiseEnd = time + p.noiseDecay;
       noiseEnvelope.gain.setValueAtTime(0.0001, time);
-      noiseEnvelope.gain.linearRampToValueAtTime(0.16 * velocity * p.noiseAmount * (1 - p.softness * 0.4), time + 0.002);
+      noiseEnvelope.gain.linearRampToValueAtTime(0.16 * velocity * p.noiseAmount * (p.model === 'percussion' ? 2.2 : 1) * (1 - p.softness * 0.4), time + 0.002);
       noiseEnvelope.gain.exponentialRampToValueAtTime(0.0001, noiseEnd);
       noise.connect(noiseFilter).connect(noiseEnvelope).connect(panner);
       track(noise, [noiseFilter, noiseEnvelope]);

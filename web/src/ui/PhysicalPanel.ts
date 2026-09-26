@@ -1,52 +1,56 @@
-import { BellEngine } from '../audio/BellEngine';
-import type { BellSnapshot } from '../ai/PatchPlan';
-import { bellControlGroups, type BellParameters } from '../parameters';
+import { PhysicalEngine } from '../audio/PhysicalEngine';
+import type { PhysicalSnapshot } from '../ai/PatchPlan';
+import { physicalSourceGroups, type PhysicalParameters } from '../parameters';
+import { ParameterLfoControl } from './ParameterLfoControl';
+import type { ParameterLfoMap } from '../audio/ParameterLfo';
 
-type BellParameter = keyof BellParameters;
+type PhysicalParameter = keyof PhysicalParameters;
 
 function noteName(note: number): string {
   const names = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
   return `${names[note % 12]}${Math.floor(note / 12) - 1}`;
 }
 
-function formatValue(key: BellParameter, value: number, unit = ''): string {
+function formatValue(key: PhysicalParameter, value: number, unit = ''): string {
   if (key === 'rootNote') return noteName(value);
   return `${Number(value.toFixed(2))}${unit ? ` ${unit}` : ''}`;
 }
 
-export interface BellPanel {
-  kind: 'bell';
+export interface PhysicalPanel {
+  kind: 'physical';
   root: HTMLElement;
   outputPort: HTMLElement;
   label: string;
-  engine: BellEngine;
-  getSnapshot(): BellSnapshot;
-  applyParameters(parameters: BellParameters): void;
+  engine: PhysicalEngine;
+  getSnapshot(): PhysicalSnapshot;
+  applyParameters(parameters: PhysicalParameters): void;
+  lfos: ParameterLfoMap;
   applySequence(sequence: number[]): void;
   start(): Promise<void>;
   stop(): void;
 }
 
-export function createBellPanel(
+export function createPhysicalPanel(
   id: number,
-  engine: BellEngine,
+  engine: PhysicalEngine,
   onRemove: (id: number) => void,
   onStateChange: () => void,
-): BellPanel {
-  const label = `BELL ${String(id).padStart(2, '0')}`;
+): PhysicalPanel {
+  const label = `PHYSICAL ${String(id).padStart(2, '0')}`;
   const root = document.createElement('article');
-  root.className = 'module-card bell-card';
+  root.className = 'module-card physical-card';
   root.dataset.moduleId = String(id);
   root.innerHTML = `
     <div class="module-head">
-      <div class="module-identity"><span class="module-icon">◌</span><div><span class="module-kicker">INSTRUMENT / ${label}</span><h2>bell~</h2></div></div>
+      <div class="module-identity"><span class="module-icon">◌</span><div><span class="module-kicker">INSTRUMENT / ${label}</span><h2>physical~</h2></div></div>
       <div class="module-actions"><span class="module-led" aria-hidden="true"></span><button class="icon-button remove-button" type="button" title="Remove ${label}" aria-label="Remove ${label}">×</button></div>
     </div>
-    <div class="module-flow"><span class="port input-port"></span><span>mallet~ + noise~</span><span class="flow-arrow">→</span><span>modes~ ×7</span><span class="flow-arrow">→</span><span>cloud~</span><span class="port output-port" title="Audio output"></span></div>
-    <div class="module-section bell-source"><div class="section-title"><span>01</span> MODAL RESONATOR</div><p>Shape the strike noise, hit position, partial tuning, damping, and body resonance. The sequence follows the selected root.</p><div class="bell-sequence"><span>NOTE SEQUENCE</span><output class="bell-sequence-notes"></output></div></div>
+    <div class="module-flow"><span>RESONATOR / STEREO</span><button type="button" class="port output-port" aria-label="Connect physical output">OUT</button></div>
+    <div class="module-section physical-model"><label for="physical-model-${id}">RESONATOR MODEL</label><select id="physical-model-${id}" aria-label="${label} resonator model"><option value="bell">Bell</option><option value="percussion">Percussive body</option><option value="string">Plucked string</option></select><p class="physical-model-hint">Choose the resonator character. Connect a delay node for lingering melodic repeats.</p></div>
+    <div class="module-section physical-source"><div class="section-title"><span>01</span> MODAL RESONATOR</div><p>Shape the strike noise, hit position, partial tuning, damping, and body resonance. The sequence follows the selected root.</p><div class="physical-sequence"><span>NOTE SEQUENCE</span><output class="physical-sequence-notes"></output></div></div>
     <div class="module-section transport-section"><button class="module-play" type="button">▶ <span>PLAY</span></button><button class="module-strike" type="button" aria-label="Strike ${label} once">STRIKE</button><span class="module-status" role="status">Ready</span></div>
     <div class="module-controls"></div>
-    <div class="module-foot"><span>OUT L / R</span><span>→ MASTER BUS</span></div>
+    <div class="module-foot"><span>OUT L / R</span><span>DRY SOURCE</span></div>
   `;
 
   const outputPort = root.querySelector<HTMLElement>('.output-port')!;
@@ -54,7 +58,15 @@ export function createBellPanel(
   const playButton = root.querySelector<HTMLButtonElement>('.module-play')!;
   const led = root.querySelector<HTMLElement>('.module-led')!;
   const controls = root.querySelector<HTMLElement>('.module-controls')!;
-  const sequenceNotes = root.querySelector<HTMLOutputElement>('.bell-sequence-notes')!;
+  const sequenceNotes = root.querySelector<HTMLOutputElement>('.physical-sequence-notes')!;
+  const modelSelect = root.querySelector<HTMLSelectElement>('.physical-model select')!;
+  const lfos: ParameterLfoMap = {};
+  const lfoByKey = new Map<string, ParameterLfoControl>();
+  const syncLfos = () => engine.setParameterLfos(lfos);
+  modelSelect.value = engine.currentParameters.model;
+  modelSelect.addEventListener('change', () => {
+    engine.setParameter('model', modelSelect.value as PhysicalParameters['model']);
+  });
 
   function renderSequence(): void {
     const rootNote = engine.currentParameters.rootNote;
@@ -74,22 +86,24 @@ export function createBellPanel(
     onStateChange();
   }
 
-  for (const [groupIndex, group] of bellControlGroups.entries()) {
+  for (const [groupIndex, group] of physicalSourceGroups.entries()) {
     const block = document.createElement('section');
     block.className = 'parameter-block';
-    block.innerHTML = `<div class="section-title"><span>${String(groupIndex + 2).padStart(2, '0')}</span> ${group.title.toUpperCase()}</div><div class="parameter-grid"></div>`;
+    block.innerHTML = `<div class="section-title"><span>${String(groupIndex + 3).padStart(2, '0')}</span> ${group.title.toUpperCase()}</div><div class="parameter-grid"></div>`;
     const grid = block.querySelector<HTMLElement>('.parameter-grid')!;
     for (const definition of group.controls) {
-      const row = document.createElement('label');
+      const row = document.createElement('div');
       row.className = 'control';
       const initial = engine.currentParameters[definition.key];
       row.innerHTML = `<span class="control-heading"><span class="control-label">${definition.label.toUpperCase()}</span><output>${formatValue(definition.key, initial, definition.unit)}</output></span><input data-param="${definition.key}" type="range" min="${definition.min}" max="${definition.max}" step="${definition.step}" value="${initial}" aria-label="${label} ${definition.label}" />`;
       const input = row.querySelector<HTMLInputElement>('input')!;
       const output = row.querySelector<HTMLOutputElement>('output')!;
+      lfoByKey.set(definition.key, new ParameterLfoControl(row.querySelector<HTMLElement>('.control-heading')!, definition.key, input, (settings) => { lfos[definition.key] = settings; syncLfos(); }, (value) => formatValue(definition.key, value, definition.unit)));
       input.addEventListener('input', () => {
         const value = Number(input.value);
         engine.setParameter(definition.key, value);
-        output.value = formatValue(definition.key, value, definition.unit);
+        input.value = String(engine.currentParameters[definition.key]);
+        output.value = formatValue(definition.key, engine.currentParameters[definition.key], definition.unit);
         if (definition.key === 'rootNote') renderSequence();
       });
       grid.append(row);
@@ -127,22 +141,27 @@ export function createBellPanel(
   root.querySelector<HTMLButtonElement>('.remove-button')!.addEventListener('click', () => onRemove(id));
 
   return {
-    kind: 'bell',
+    kind: 'physical',
     root,
     outputPort,
     label,
     engine,
+    lfos,
     getSnapshot() {
-      return { id, type: 'bell', label, playing: engine.isPlaying, parameters: engine.currentParameters, sequence: engine.currentSequence };
+      return { id, type: 'physical', label, playing: engine.isPlaying, parameters: engine.currentParameters, sequence: engine.currentSequence };
     },
     applyParameters(parameters) {
-      for (const group of bellControlGroups) {
+      modelSelect.value = parameters.model;
+      engine.setParameter('model', parameters.model);
+      for (const group of physicalSourceGroups) {
         for (const definition of group.controls) {
           const input = controls.querySelector<HTMLInputElement>(`[data-param="${definition.key}"]`)!;
           input.value = String(parameters[definition.key]);
           const value = Number(input.value);
           engine.setParameter(definition.key, value);
-          input.closest('.control')!.querySelector<HTMLOutputElement>('output')!.value = formatValue(definition.key, value, definition.unit);
+          lfoByKey.get(definition.key)?.setBase(value);
+          input.value = String(engine.currentParameters[definition.key]);
+          input.closest('.control')!.querySelector<HTMLOutputElement>('output')!.value = formatValue(definition.key, engine.currentParameters[definition.key], definition.unit);
         }
       }
       renderSequence();

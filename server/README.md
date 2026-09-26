@@ -85,6 +85,8 @@ Returns direct `audio/mpeg` MP3 stream.
 
 `POST /api/image-patch` accepts JSON with `prompt`, `system_prompt`, and `image_data_url`. The image must be a PNG, JPEG, or WebP base64 data URL, up to 8 MB decoded. The route sends the text and image together to a vision-capable OpenAI model (`OPENAI_VISION_MODEL`, default `gpt-4o-mini`) and returns the model's text in the same `response` field as `/api/chat`. The web app supplies the current module settings and required JSON patch format in the prompt, then validates the returned scene description, musical mood, settings, and SFX keywords locally.
 
+Both endpoints accept an optional `model` override. The web Mood Settings panel sends its selected text and painting models with each request. GPT-6 models use the Responses API; other selected models use Chat Completions. The dependency requirement includes the Responses API client. Model availability still depends on the OpenAI project and API key.
+
 ```json
 {
   "prompt": "Describe the visible scene and translate it into synth settings...",

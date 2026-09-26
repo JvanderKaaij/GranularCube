@@ -15,6 +15,7 @@ export interface RangeControl {
   root: HTMLElement;
   setBounds(min: number, max: number): void;
   setValues(lower: number, upper: number): void;
+  setDisplayValues(lower: number, upper: number): void;
   getValues(): [number, number];
 }
 
@@ -143,6 +144,9 @@ export function createRangeControl(
       control.setValues(lower, upper);
     },
     setValues(lower: number, upper: number) {
+      control.setDisplayValues(lower, upper);
+    },
+    setDisplayValues(lower: number, upper: number) {
       lowerInput.value = String(valueToPosition(Math.min(lower, upper)));
       upperInput.value = String(valueToPosition(Math.max(lower, upper)));
       render();

@@ -1,229 +1,281 @@
-import { buildImagePatchPrompt, buildMoodPrompt, IMAGE_PATCH_SYSTEM_PROMPT, parseImagePatchPlan, parsePatchPlan, PATCH_SYSTEM_PROMPT, type PatchPlan, type PatchSnapshot } from './PatchPlan';
+import { type PatchPlan, type PatchSnapshot } from './PatchPlan';
 import { PATCH_TRANSITION_MS } from './PatchTransition';
-import { IMAGE_PATCH_URL, requestImagePatch } from './ImageClient';
-import { requestSoundEffect } from './SfxClient';
+import { requestImagePatch } from './ImageClient';
+import { requestAvailableSamples, requestSoundEffect } from './SfxClient';
+import { requestChat } from './ChatClient';
+import { briefPrompt, parseBrief, parameterPrompt, composePatch, type ApplicationOptions, type ApplicationReport } from './Composition';
+import { createPromptEditor, type PromptSettings } from '../ui/PromptEditor';
+import { OPENAI_MODELS, isOpenAIModel } from './OpenAIModels';
 
-const CHAT_URL = 'http://0.0.0.0:8000/api/chat';
-const LOCAL_FALLBACK_URL = 'http://127.0.0.1:8000/api/chat';
-const MODEL = 'gpt-6-luna';
-const REQUEST_TIMEOUT_MS = 120_000;
+const MODEL_STORAGE_KEY = 'granularcube.openai-models.v1';
 
-interface ChatResponse {
-  success: boolean;
-  response: string;
-  is_mock?: boolean;
-}
-
-export interface MoodController {
-  root: HTMLElement;
-  updateOverview(): void;
-}
-
-export interface ImageCompositionActions {
-  prepareImageLayers(): number[];
-  discardImageLayers(ids: number[]): void;
-}
-
-function sameModuleContext(before: PatchSnapshot, now: PatchSnapshot): boolean {
-  if (before.modules.length !== now.modules.length) return false;
-  return before.modules.every((module, index) => {
-    const current = now.modules[index];
-    return current.id === module.id && current.type === module.type &&
-      (module.type !== 'granular' || (current.type === 'granular' && current.sample === module.sample));
-  });
-}
-
+export interface MoodController { root: HTMLElement; updateOverview(): void; cancelPending(): void }
 export function createMoodController(
   getSnapshot: () => PatchSnapshot,
-  applyPlan: (plan: PatchPlan, durationMs: number, onProgress: (progress: number) => void, generatedSamples?: Map<number, { keyword: string; audioUrl: string }>, startImageModules?: boolean) => Promise<void>,
-  imageActions: ImageCompositionActions,
+  applyPlan: (plan: PatchPlan, durationMs: number, onProgress: (progress: number) => void,
+    generatedSamples?: Map<number, { keyword: string; audioUrl: string }>, startImageModules?: boolean,
+    options?: ApplicationOptions) => Promise<ApplicationReport>,
+  setEvolution: (enabled: boolean) => void = () => {},
 ): MoodController {
   const root = document.createElement('section');
   root.className = 'mood-node';
-  root.setAttribute('aria-label', 'Mood settings API');
+  root.setAttribute('aria-label', 'Mood composition');
   root.innerHTML = `
-    <div class="mood-head"><span class="mood-symbol">◇</span><div><span class="node-kicker">CONTROL / API 01</span><h2>mood~</h2></div></div>
-    <div class="mood-flow">PROMPT <span>→</span> JSON <span>→</span> PATCH</div>
+    <div class="mood-head"><span class="mood-symbol">◇</span><div><span class="node-kicker">COMPOSITION</span><h2>mood~</h2></div><button class="mood-close icon-button" type="button" aria-label="Collapse mood settings" title="Collapse mood settings">×</button></div>
+    <div class="mood-flow">BRIEF → VOICES → SOUNDSCAPE</div>
     <div class="mood-body">
+      <details class="mood-details model-settings" open><summary>OPENAI MODELS</summary><div class="model-settings-grid">
+        <label class="mood-label" for="mood-text-model">MOOD & SYNTH PARAMETERS<select id="mood-text-model" class="model-select">${OPENAI_MODELS.map(({ id, label }) => `<option value="${id}" ${id === 'gpt-6-sol' ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+        <label class="mood-label" for="mood-image-model">PAINTING INTERPRETATION<select id="mood-image-model" class="model-select">${OPENAI_MODELS.map(({ id, label }) => `<option value="${id}" ${id === 'gpt-6-sol' ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      </div><p class="model-help">Saved in this browser. Painting analysis and text composition can use different models.</p></details>
       <label class="mood-label" for="mood-prompt">MOOD / INTENTION</label>
-      <textarea id="mood-prompt" rows="4" placeholder="Soft, nocturnal, spacious, gently shimmering…">Soft, nocturnal, spacious, gently shimmering</textarea>
-      <label class="mood-transition-label" for="mood-transition"><span>TRANSITION TIME</span><output id="mood-transition-value">${(PATCH_TRANSITION_MS / 1000).toFixed(1)} s</output></label>
-      <input id="mood-transition" type="range" min="0.2" max="30" step="0.1" value="${PATCH_TRANSITION_MS / 1000}" aria-label="Mood transition time in seconds" />
-      <button class="mood-apply" type="button">↗ REQUEST & APPLY</button>
+      <textarea id="mood-prompt" rows="5" placeholder="Describe a mood, or interpret a painting below…"></textarea>
+      <label class="mood-transition-label" for="mood-transition"><span>TRANSITION TIME</span><output id="mood-transition-value">${PATCH_TRANSITION_MS / 1000} s</output></label>
+      <input id="mood-transition" type="range" min="0.2" max="30" step="0.1" value="${PATCH_TRANSITION_MS / 1000}" />
+      <label class="mood-label evolution-control"><input class="evolution-enabled" type="checkbox" checked /> SLOW EVOLUTION</label>
+      <button class="mood-apply" type="button">↗ COMPOSE & APPLY</button>
       <div class="image-patch-control">
-        <label class="mood-label" for="image-patch-file">IMAGE / SCENE INPUT</label>
-        <input id="image-patch-file" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Image for synth patch" />
-        <div class="image-patch-hint">MOOD / INTENTION above gives optional scene direction.</div>
-        <div class="image-patch-preview" hidden><img alt="Selected scene" /></div>
-        <button class="image-patch-apply" type="button">▧ IMAGE → PATCH + SFX</button>
+        <label class="mood-label" for="image-patch-file">PAINTING</label>
+        <input id="image-patch-file" type="file" accept="image/png,image/jpeg,image/webp" />
+        <div class="image-patch-hint">The painting creates a new musical brief and replaces the intention above.</div>
+        <div class="image-patch-preview" hidden><img alt="Selected painting" /></div>
+        <button class="image-patch-apply" type="button">▧ INTERPRET & COMPOSE</button>
         <div class="image-patch-scene" aria-live="polite"></div>
         <div class="image-patch-composition" aria-live="polite"></div>
       </div>
+      <button class="mood-cancel mini-button" type="button" hidden>CANCEL REQUEST</button>
       <div class="mood-status" role="status">Ready to shape the current patch.</div>
+      <div class="pipeline-summary" aria-live="polite"></div>
       <div class="mood-progress" hidden><span>TRANSITION <output>0%</output></span><progress max="100" value="0"></progress></div>
-      <details class="mood-details"><summary>CURRENT SETTINGS</summary><pre class="mood-current"></pre></details>
-      <details class="mood-details"><summary>LAST APPLIED RESPONSE</summary><pre class="mood-response">—</pre></details>
-      <div class="mood-endpoint">MOOD POST ${CHAT_URL}<br />IMAGE POST ${IMAGE_PATCH_URL}<br />MOOD MODEL ${MODEL} · IMAGE MODEL OPENAI_VISION_MODEL</div>
-    </div>
-  `;
-  const prompt = root.querySelector<HTMLTextAreaElement>('#mood-prompt')!;
-  const button = root.querySelector<HTMLButtonElement>('.mood-apply')!;
-  const imageInput = root.querySelector<HTMLInputElement>('#image-patch-file')!;
-  const imageButton = root.querySelector<HTMLButtonElement>('.image-patch-apply')!;
-  const imagePreview = root.querySelector<HTMLElement>('.image-patch-preview')!;
-  const imagePreviewImage = imagePreview.querySelector<HTMLImageElement>('img')!;
-  const scene = root.querySelector<HTMLElement>('.image-patch-scene')!;
-  const composition = root.querySelector<HTMLElement>('.image-patch-composition')!;
-  const transitionInput = root.querySelector<HTMLInputElement>('#mood-transition')!;
-  const transitionValue = root.querySelector<HTMLOutputElement>('#mood-transition-value')!;
-  const progressBox = root.querySelector<HTMLElement>('.mood-progress')!;
-  const progressBar = progressBox.querySelector<HTMLProgressElement>('progress')!;
-  const progressValue = progressBox.querySelector<HTMLOutputElement>('output')!;
-  const status = root.querySelector<HTMLElement>('.mood-status')!;
-  const current = root.querySelector<HTMLElement>('.mood-current')!;
-  const lastResponse = root.querySelector<HTMLElement>('.mood-response')!;
-
-  transitionInput.addEventListener('input', () => {
-    transitionValue.value = `${Number(transitionInput.value).toFixed(1)} s`;
-  });
-
-  let previewUrl: string | null = null;
-  imageInput.addEventListener('change', () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    const file = imageInput.files?.[0];
-    previewUrl = file ? URL.createObjectURL(file) : null;
-    imagePreview.hidden = !previewUrl;
-    imagePreviewImage.src = previewUrl || '';
-    scene.textContent = '';
-    composition.textContent = '';
-  });
-
-  function setStatus(message: string, error = false): void {
-    status.textContent = message;
-    status.classList.toggle('error', error);
-  }
-
-  const controller: MoodController = {
-    root,
-    updateOverview() {
-      current.textContent = JSON.stringify(getSnapshot(), null, 2);
-    },
+      <details class="mood-details" open><summary>PIPELINE DEBUG</summary><pre class="pipeline-debug">No composition yet.</pre></details>
+      <div class="prompt-tools-mount"></div>
+      <details class="mood-details"><summary>CURRENT BASE SETTINGS</summary><pre class="mood-current"></pre></details>
+      <details class="mood-details"><summary>LAST APPLIED PATCH</summary><pre class="mood-response">—</pre></details>
+      <details class="mood-details"><summary>REQUESTS & MODEL OUTPUTS</summary><pre class="pipeline-raw">—</pre></details>
+    </div>`;
+  const query = <T extends Element>(selector: string) => root.querySelector<T>(selector)!;
+  const prompt = query<HTMLTextAreaElement>('#mood-prompt');
+  const button = query<HTMLButtonElement>('.mood-apply');
+  const imageButton = query<HTMLButtonElement>('.image-patch-apply');
+  const imageInput = query<HTMLInputElement>('#image-patch-file');
+  const preview = query<HTMLElement>('.image-patch-preview');
+  const scene = query<HTMLElement>('.image-patch-scene');
+  const composition = query<HTMLElement>('.image-patch-composition');
+  const transition = query<HTMLInputElement>('#mood-transition');
+  const cancel = query<HTMLButtonElement>('.mood-cancel');
+  const progressBox = query<HTMLElement>('.mood-progress');
+  const progressBar = query<HTMLProgressElement>('.mood-progress progress');
+  const progressValue = query<HTMLOutputElement>('.mood-progress output');
+  const debugView = query<HTMLElement>('.pipeline-debug');
+  const rawView = query<HTMLElement>('.pipeline-raw');
+  const textModel = query<HTMLSelectElement>('#mood-text-model');
+  const imageModel = query<HTMLSelectElement>('#mood-image-model');
+  try {
+    const saved = JSON.parse(localStorage.getItem(MODEL_STORAGE_KEY) ?? '{}');
+    if (saved && typeof saved === 'object') {
+      if (isOpenAIModel(saved.text)) textModel.value = saved.text;
+      if (isOpenAIModel(saved.image)) imageModel.value = saved.image;
+    }
+  } catch { /* Invalid browser preferences use the server's current default. */ }
+  const saveModels = () => {
+    try { localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify({ text: textModel.value, image: imageModel.value })); }
+    catch { /* Model choices still apply for this page session. */ }
   };
+  textModel.addEventListener('change', saveModels);
+  imageModel.addEventListener('change', saveModels);
+  const promptEditor = createPromptEditor();
+  query<HTMLElement>('.prompt-tools-mount').append(promptEditor.root);
+  query<HTMLButtonElement>('.mood-close').addEventListener('click', () => {
+    const dock = root.closest<HTMLElement>('.mood-dock');
+    if (dock) dock.hidden = true;
+    document.querySelector<HTMLButtonElement>('#show-mood')?.setAttribute('aria-expanded', 'false');
+  });
+  let active: AbortController | null = null;
+  let previewUrl: string | null = null;
+  const history: string[][] = [];
+  const setStatus = (text: string, error = false) => {
+    query<HTMLElement>('.mood-status').textContent = text;
+    query<HTMLElement>('.mood-status').classList.toggle('error', error);
+  };
+  transition.addEventListener('input', () => { query<HTMLOutputElement>('#mood-transition-value').value = `${Number(transition.value).toFixed(1)} s`; });
+  query<HTMLInputElement>('.evolution-enabled').addEventListener('change', (e) => setEvolution((e.target as HTMLInputElement).checked));
+  cancel.addEventListener('click', () => active?.abort());
+  imageInput.addEventListener('change', () => {
+    active?.abort();
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = imageInput.files?.[0] ? URL.createObjectURL(imageInput.files[0]) : null;
+    preview.hidden = !previewUrl;
+    preview.querySelector('img')!.src = previewUrl ?? '';
+    scene.textContent = composition.textContent = '';
+  });
+  const controller: MoodController = { root, cancelPending: () => active?.abort(), updateOverview() {
+    query<HTMLElement>('.mood-current').textContent = JSON.stringify(getSnapshot(), null, 2);
+  } };
 
-  async function runRequest(mode: 'mood' | 'image'): Promise<void> {
-    const mood = prompt.value.trim();
-    if (mode === 'mood' && !mood) {
-      setStatus('Describe a mood before requesting settings.', true);
-      prompt.focus();
-      return;
-    }
-    const imageFile = imageInput.files?.[0];
-    if (mode === 'image' && !imageFile) {
-      setStatus('Choose an image before requesting a scene patch.', true);
-      imageInput.focus();
-      return;
-    }
-    if (mode === 'mood') {
-      scene.textContent = '';
-      composition.textContent = '';
-    }
-    const addedImageLayers = mode === 'image' ? imageActions.prepareImageLayers() : [];
-    let applied = false;
+  async function run(mode: 'mood' | 'image'): Promise<void> {
+    if (active) return;
+    const file = imageInput.files?.[0];
+    if (mode === 'image' && !file) { setStatus('Choose a painting first.', true); return; }
+    if (mode === 'mood' && !prompt.value.trim()) { setStatus('Describe a mood first.', true); return; }
     const snapshot = getSnapshot();
-    const durationMs = Number(transitionInput.value) * 1000;
-    if (snapshot.modules.length === 0) {
-      setStatus('Add an instrument module first.', true);
-      return;
-    }
-
+    if (!snapshot.modules.length) { setStatus('Add an instrument first.', true); return; }
+    let prompts: PromptSettings;
+    try { prompts = promptEditor.getSettings(); }
+    catch (error) { setStatus(error instanceof Error ? error.message : String(error), true); return; }
+    // Snapshot the prompt edits once, so edits made during generation affect the next run.
+    promptEditor.beginRun();
     const abort = new AbortController();
-    const timeout = window.setTimeout(() => abort.abort(), mode === 'image' ? REQUEST_TIMEOUT_MS * 2 : REQUEST_TIMEOUT_MS);
-    button.disabled = true;
-    imageButton.disabled = true;
-    setStatus(mode === 'image' ? 'Describing image and designing connected synth + SFX settings…' : `Requesting settings for ${snapshot.modules.length} module${snapshot.modules.length === 1 ? '' : 's'}…`);
+    active = abort;
+    const durationMs = Number(transition.value) * 1000;
+    const selectedTextModel = textModel.value;
+    const selectedImageModel = imageModel.value;
+    const modelForBrief = mode === 'image' ? selectedImageModel : selectedTextModel;
+    const started = performance.now();
+    const timings: Record<string, number> = {};
+    const running = new Map<string, number>();
+    const repairs: string[] = [];
+    const debug: Record<string, unknown> = { status: 'Preparing', repairs };
+    const raw: Record<string, unknown> = { sfxPromptTemplate: prompts.sfxTemplate, models: { text: selectedTextModel, painting: selectedImageModel, brief: modelForBrief } };
+    let timedOut = false;
+    let internalFailure = false;
+    const timeout = window.setTimeout(() => { timedOut = true; abort.abort(); }, 300_000);
+    const render = () => {
+      query<HTMLElement>('.pipeline-summary').textContent = [
+        ...Object.entries(timings).map(([key, value]) => `${key}: ${(value / 1000).toFixed(1)}s`),
+        ...[...running].map(([key, value]) => `${key}: ${((performance.now() - value) / 1000).toFixed(1)}s…`),
+      ].join(' · ');
+      debugView.textContent = JSON.stringify({ ...debug, timingsSeconds: Object.fromEntries(Object.entries(timings).map(([k, v]) => [k, +(v / 1000).toFixed(2)])),
+        activeStages: Object.fromEntries([...running].map(([k, v]) => [k, `${((performance.now() - v) / 1000).toFixed(1)}s`])) }, null, 2);
+      rawView.textContent = JSON.stringify(raw, null, 2);
+    };
+    const interval = window.setInterval(render, 500);
+    const timed = async <T,>(name: string, fn: () => Promise<T>): Promise<T> => {
+      const start = performance.now(); running.set(name, start); render();
+      try { return await fn(); } finally { timings[name] = performance.now() - start; running.delete(name); render(); }
+    };
+    const validResponse = async <T,>(name: string, instruction: string, system: string, first: () => Promise<string>, parse: (text: string) => T, repair?: (instruction: string) => Promise<string>): Promise<T> => {
+      const model = name === 'brief' ? modelForBrief : selectedTextModel;
+      const title = `${name === 'brief' ? (mode === 'image' ? 'Painting' : 'Mood') + ' brief' : 'Synth parameters & notes'} · ${model}`;
+      promptEditor.recordRequest(title, instruction, system);
+      let text = await first(); raw[`${name}Response`] = text;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { return parse(text); }
+        catch (error) {
+          const issue = error instanceof Error ? error.message : String(error);
+          if (attempt === 2) throw new Error(`${name} response still failed validation after two corrections: ${issue}`);
+          repairs.push(`${name}: ${issue}; requesting correction ${attempt + 1}/2`);
+          render();
+          const grounding = name === 'brief'
+            ? `Use the original ${mode === 'image' ? 'uploaded artwork' : 'mood intention'} as evidence. Replace copied formatting text and revisit any unsupported sound source or evidence.`
+            : 'Compose from the validated brief and its sonic evidence. Preserve supported musical choices while correcting invalid fields.';
+          const correction = `${instruction}\nYour response failed validation: ${issue}\nReturn a complete JSON object whose actual composed values conform to outputSchema. Do not return the schema or copy its field descriptions. Include every required module ID exactly once. ${grounding}\nResponse to correct:\n${text}`;
+          raw[`${name}CorrectionPrompt${attempt + 1}`] = correction;
+          promptEditor.recordRequest(`${title} · correction ${attempt + 1}/2`, correction, system);
+          text = await (repair ? repair(correction) : requestChat(correction, system, abort.signal, model));
+          raw[`${name}RepairedResponse${attempt + 1}`] = text;
+        }
+      }
+      throw new Error(`${name} response could not be validated`);
+    };
+    button.disabled = imageButton.disabled = true;
+    cancel.hidden = false;
+    progressBox.hidden = true;
     try {
-      let responseText: string;
-      if (mode === 'image') {
-        const body = await requestImagePatch(buildImagePatchPrompt(mood, snapshot), IMAGE_PATCH_SYSTEM_PROMPT, imageFile!, abort.signal);
-        responseText = body.response;
-      } else {
-        const request: RequestInit = {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: buildMoodPrompt(mood, snapshot), system_prompt: PATCH_SYSTEM_PROMPT, model: MODEL }),
-          signal: abort.signal,
-        };
-        let response: Response;
-        try {
-          response = await fetch(CHAT_URL, request);
-        } catch (error) {
-          if (abort.signal.aborted) throw error;
-          response = await fetch(LOCAL_FALLBACK_URL, request);
-        }
-        if (!response.ok) {
-          let detail = `HTTP ${response.status}`;
-          try {
-            const body: unknown = await response.json();
-            if (typeof body === 'object' && body !== null && 'detail' in body) detail = String(body.detail);
-          } catch { /* Use the status code. */ }
-          throw new Error(`API request failed: ${detail}`);
-        }
-        const body: ChatResponse = await response.json();
-        if (!body.success || typeof body.response !== 'string') throw new Error('API response is missing generated settings');
-        if (body.is_mock) throw new Error('API is in mock mode; configure its OpenAI key to generate settings.');
-        responseText = body.response;
-      }
-      const imageResult = mode === 'image' ? parseImagePatchPlan(responseText, snapshot) : null;
-      const plan = imageResult?.plan ?? parsePatchPlan(responseText, snapshot);
-      if (!sameModuleContext(snapshot, getSnapshot())) throw new Error('Modules or samples changed during the request. Please try again.');
+      setStatus('Interpreting atmosphere, roles and sound sources…');
+      const recent = history.flat();
+      const availableSamples = await timed('sampleAvailability', () => requestAvailableSamples(abort.signal));
+      raw.availableSampleFilenames = availableSamples;
+      const briefRequest = briefPrompt(snapshot, prompt.value.trim(), mode === 'image', recent, availableSamples, prompts.sfxTemplate);
+      raw.briefPrompt = briefRequest;
+      raw.briefSystem = prompts.briefSystem;
+      const brief = await timed(mode === 'image' ? 'imageInterpretation' : 'moodInterpretation', () => validResponse('brief', briefRequest, prompts.briefSystem,
+        async () => mode === 'image' ? (await requestImagePatch(briefRequest, prompts.briefSystem, file!, abort.signal, selectedImageModel)).response : requestChat(briefRequest, prompts.briefSystem, abort.signal, selectedTextModel),
+        (text) => parseBrief(text, snapshot, mode === 'image', availableSamples, prompts.sfxTemplate),
+        mode === 'image' ? async (instruction) => (await requestImagePatch(instruction, prompts.briefSystem, file!, abort.signal, selectedImageModel)).response : undefined));
+      abort.signal.throwIfAborted();
+      prompt.value = brief.mood;
+      scene.textContent = `${brief.description}${mode === 'image' ? ` Era: ${brief.era}` : ''}`;
+      composition.textContent = brief.composition;
+      debug.brief = brief;
+      const hasSfx = brief.modules.some((module) => module.source === 'sfx');
+      debug.status = hasSfx ? 'Generating parameters and artwork sound in parallel' : 'Generating parameters with catalog samples';
+      debug.sfx = hasSfx ? { status: 'Requested', requests: brief.modules.filter((module) => module.source === 'sfx').map((module) => ({ id: module.id, prompt: module.sfxPrompt, durationSeconds: 8, basis: brief.imageSound?.basis })) }
+        : { status: 'Not applicable: text request or no granular voice' };
+      render();
+      setStatus(hasSfx ? `Generating an eight-second artwork sound: ${brief.imageSound?.source}…` : 'Brief ready. Composing voices with catalog samples…');
+      const patchRequest = parameterPrompt(brief, snapshot, recent);
+      raw.parameterPrompt = patchRequest;
+      raw.parameterSystem = prompts.parameterSystem;
       const generatedSamples = new Map<number, { keyword: string; audioUrl: string }>();
-      if (imageResult) {
-        for (const [id, keyword] of imageResult.sfxKeywords) {
-          setStatus(`Generating scene sound “${keyword}” for GRAIN ${String(id).padStart(2, '0')}…`);
-          const generated = await requestSoundEffect(keyword, abort.signal);
-          generatedSamples.set(id, { keyword, audioUrl: generated.audioUrl });
-        }
-        if (!sameModuleContext(snapshot, getSnapshot())) throw new Error('Modules or samples changed while generating sounds. Please try again.');
+      const jobs = [
+        timed('parameterGeneration', () => validResponse('parameters', patchRequest, prompts.parameterSystem,
+          () => requestChat(patchRequest, prompts.parameterSystem, abort.signal, selectedTextModel), (text) => composePatch(text, brief, snapshot, recent))),
+        timed('sfxGeneration', async () => {
+          try {
+            for (const module of brief.modules.filter((m) => m.source === 'sfx')) {
+              raw.sfxRequest = { prompt: module.sfxPrompt, duration_seconds: 8, prompt_influence: 0.55 };
+              promptEditor.recordRequest('ElevenLabs · artwork sound', JSON.stringify(raw.sfxRequest, null, 2));
+              const sound = await requestSoundEffect(module.sfxPrompt!, abort.signal, { durationSeconds: 8, promptInfluence: 0.55 });
+              generatedSamples.set(module.id, { keyword: module.keyword!, audioUrl: sound.audioUrl });
+              debug.sfx = { status: 'Generated; waiting for sample preparation', id: module.id, filename: sound.filename, prompt: module.sfxPrompt };
+              render();
+            }
+          } catch (error) {
+            debug.sfx = { status: abort.signal.aborted ? 'Canceled before generation completed' : 'Generation failed', error: error instanceof Error ? error.message : String(error) };
+            render();
+            throw error;
+          }
+        }),
+      ] as const;
+      let result: Awaited<typeof jobs[0]>;
+      try { [result] = await Promise.all(jobs); }
+      catch (error) {
+        internalFailure = !abort.signal.aborted;
+        abort.abort();
+        await Promise.allSettled(jobs);
+        throw error;
       }
-      setStatus('Loading samples and moving to the new settings…');
-      progressBox.hidden = false;
-      progressBar.value = 0;
-      progressValue.value = '0%';
-      await applyPlan(plan, durationMs, (progress) => {
-        const percent = Math.round(progress * 100);
-        progressBar.value = percent;
-        progressValue.value = `${percent}%`;
-      }, generatedSamples, Boolean(imageResult));
-      applied = true;
-      if (imageResult) {
-        prompt.value = imageResult.mood;
-        scene.textContent = imageResult.description;
-        composition.textContent = imageResult.composition;
-      }
-      lastResponse.textContent = JSON.stringify(imageResult
-        ? { description: imageResult.description, mood: imageResult.mood, composition: imageResult.composition, ...plan, roles: Object.fromEntries(imageResult.roles), sources: Object.fromEntries(imageResult.sources), sfx_keywords: Object.fromEntries(imageResult.sfxKeywords) }
-        : plan, null, 2);
+      abort.signal.throwIfAborted();
+      if (JSON.stringify(snapshot) !== JSON.stringify(getSnapshot())) throw new Error('Patch changed during composition. Retry to preserve your manual edits.');
+      debug.decisions = result.debug;
+      for (const change of result.debug.changes) if (change.key === 'sample' && typeof change.id === 'number' && generatedSamples.has(change.id)) change.after = `AI · ${generatedSamples.get(change.id)!.keyword}`;
+      const report = await applyPlan(result.plan, durationMs, (progress) => {
+        progressBar.value = Math.round(progress * 100); progressValue.value = `${progressBar.value}%`;
+      }, generatedSamples, mode === 'image', { signal: abort.signal, movement: result.movement,
+        onPhase(phase) {
+          debug.status = phase === 'decode' ? 'Fetching and decoding all samples' : 'Transitioning';
+          setStatus(phase === 'decode' ? 'Preparing all samples; current soundscape continues…' : 'All samples ready. Transitioning together…');
+          if (phase === 'decode') running.set('samplePreparation', performance.now());
+          else { timings.samplePreparation = performance.now() - (running.get('samplePreparation') ?? performance.now()); running.delete('samplePreparation'); }
+          progressBox.hidden = phase !== 'transition'; progressBar.value = 0; progressValue.value = '0%'; render();
+        } });
+      timings.samplePreparation = report.decodeMs;
+      timings.transition = report.transitionMs;
+      debug.decodedSamples = report.samples;
+      if (hasSfx) debug.sfx = { status: 'Decoded and installed', sources: Object.fromEntries(generatedSamples) };
+      query<HTMLElement>('.mood-response').textContent = JSON.stringify({ brief, ...result.plan, actualAppliedState: getSnapshot(), generatedSources: Object.fromEntries(generatedSamples), movement: result.movement }, null, 2);
+      history.push(result.plan.modules.flatMap((m) => m.type === 'granular' && !generatedSamples.has(m.id) ? [m.sample] : []));
+      if (history.length > 4) history.shift();
+      debug.status = 'Applied';
+      debug.evolution = result.movement;
+      setStatus('Soundscape applied. Slow evolution follows the musical brief.');
       controller.updateOverview();
-      setStatus(`${mode === 'image' ? 'Applied image composition' : 'Applied mood'} to ${plan.modules.length} module${plan.modules.length === 1 ? '' : 's'}. ${mode === 'image' ? 'Layers are playing.' : 'New grains and strikes use these settings.'}`);
     } catch (error) {
-      if (!applied && addedImageLayers.length) imageActions.discardImageLayers(addedImageLayers);
-      const message = error instanceof Error ? error.message : 'Request failed';
-      setStatus(error instanceof DOMException && error.name === 'AbortError'
-        ? 'The request timed out.'
-        : message === 'Failed to fetch'
-          ? `Could not reach ${mode === 'image' ? IMAGE_PATCH_URL : `${CHAT_URL} or ${LOCAL_FALLBACK_URL}`}. Check that the API is running.`
-          : message, true);
+      const canceled = abort.signal.aborted && !internalFailure;
+      abort.abort();
+      const message = timedOut ? 'Request timed out.' : canceled ? 'Request canceled.' : error instanceof Error ? error.message : String(error);
+      debug.status = 'Not completed'; debug.error = message;
+      setStatus(message, true);
     } finally {
-      window.clearTimeout(timeout);
-      button.disabled = false;
-      imageButton.disabled = false;
-      progressBox.hidden = true;
+      window.clearTimeout(timeout); window.clearInterval(interval);
+      timings.total = performance.now() - started;
+      for (const [name, time] of running) timings[name] = performance.now() - time;
+      running.clear(); render();
+      active = null; button.disabled = imageButton.disabled = false; cancel.hidden = true; progressBox.hidden = true;
     }
   }
-
-  button.addEventListener('click', () => { void runRequest('mood'); });
-  imageButton.addEventListener('click', () => { void runRequest('image'); });
-
+  button.addEventListener('click', () => { void run('mood'); });
+  imageButton.addEventListener('click', () => { void run('image'); });
   controller.updateOverview();
   return controller;
 }

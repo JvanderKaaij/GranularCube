@@ -20,6 +20,7 @@ load_dotenv()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SFX_DIR = STATIC_DIR / "sfx"
 SFX_DIR.mkdir(parents=True, exist_ok=True)
+SAMPLES_DIR = Path(__file__).resolve().parent.parent / "Samples"
 
 app = FastAPI(
     title="AI Audio & Text Proxy API",
@@ -38,6 +39,17 @@ app.add_middleware(
 
 # Mount static folder for serving generated audio files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/api/samples")
+async def list_available_samples():
+    """List built-in audio filenames that the web build can copy and load."""
+    if not SAMPLES_DIR.is_dir():
+        raise HTTPException(status_code=503, detail="Built-in Samples directory is unavailable")
+    return {"success": True, "samples": sorted(
+        path.name for path in SAMPLES_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in {".wav", ".aif", ".aiff", ".mp3", ".m4a", ".ogg"}
+    )}
 
 # Initialize Clients
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -64,6 +76,7 @@ class GenerateRequest(BaseModel):
     model: Optional[str] = Field(None, description="OpenAI model (e.g. gpt-4o-mini, gpt-4o, gpt-3.5-turbo)")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0, description="Sampling temperature (omit or 1 for reasoning models)")
     max_tokens: Optional[int] = Field(None, ge=1, description="Maximum tokens to generate")
+    json_mode: Optional[bool] = Field(False, description="Ask OpenAI for a JSON object response")
     mock: Optional[bool] = Field(False, description="Simulate response for testing without API key")
 
 
@@ -88,11 +101,32 @@ class ImagePatchRequest(BaseModel):
     model: Optional[str] = Field(None, description="Vision-capable OpenAI model; defaults to OPENAI_VISION_MODEL")
 
 
+async def generate_responses_text(model: str, instructions: str, input_data, json_mode: bool = False):
+    """Call the Responses API for current GPT-6 models."""
+    if json_mode:
+        # The Responses API requires the word "json" in the input itself when
+        # text.format=json_object is enabled; instructions alone do not satisfy it.
+        if isinstance(input_data, str):
+            input_data = f"{input_data}\n\nReturn the result as a JSON object."
+        elif isinstance(input_data, list):
+            input_data = [*input_data, {"role": "user", "content": "Return the result as a JSON object."}]
+    request = {"model": model, "instructions": instructions, "input": input_data}
+    if json_mode:
+        request["text"] = {"format": {"type": "json_object"}}
+    return await openai_client.responses.create(**request)
+
+
+def responses_usage(usage):
+    if not usage:
+        return None
+    return UsageInfo(prompt_tokens=usage.input_tokens, completion_tokens=usage.output_tokens, total_tokens=usage.total_tokens)
+
+
 # ==========================================
 # Pydantic Schemas - ElevenLabs SFX
 # ==========================================
 class SoundFXRequest(BaseModel):
-    prompt: str = Field(..., description="Description of the sound effect (e.g., 'granular sci-fi laser blast', 'wooden door creak')")
+    prompt: str = Field(..., min_length=1, max_length=450, description="Concise description of one sound effect (maximum 450 characters)")
     duration_seconds: Optional[float] = Field(None, ge=0.5, le=22.0, description="Duration in seconds (0.5 to 22.0). If omitted, ElevenLabs decides optimal length.")
     prompt_influence: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Prompt influence (0.0 to 1.0). Higher values adhere more strictly to the prompt.")
     loop: Optional[bool] = Field(False, description="Generate seamlessly loopable sound effect")
@@ -193,6 +227,8 @@ async def generate_chat(request: GenerateRequest):
             "model": selected_model,
             "messages": messages_payload,
         }
+        if request.json_mode:
+            completion_params["response_format"] = {"type": "json_object"}
 
         # Temperature is only supported on standard GPT models, not on o1/o3 reasoning models
         if request.temperature is not None and not is_reasoning_model:
@@ -204,21 +240,29 @@ async def generate_chat(request: GenerateRequest):
             else:
                 completion_params["max_tokens"] = request.max_tokens
 
-        completion = await openai_client.chat.completions.create(**completion_params)
-        content = completion.choices[0].message.content or ""
-
-        usage = None
-        if completion.usage:
-            usage = UsageInfo(
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens,
-                total_tokens=completion.usage.total_tokens,
+        if selected_model.startswith("gpt-6-"):
+            response = await generate_responses_text(
+                selected_model,
+                request.system_prompt or "You are a helpful assistant.",
+                request.prompt or [{"role": message.role, "content": message.content} for message in request.messages or []],
+                request.json_mode,
             )
+            content = response.output_text or ""
+            usage = responses_usage(response.usage)
+            response_model = response.model
+        else:
+            completion = await openai_client.chat.completions.create(**completion_params)
+            content = completion.choices[0].message.content or ""
+            usage = None
+            if completion.usage:
+                usage = UsageInfo(prompt_tokens=completion.usage.prompt_tokens,
+                    completion_tokens=completion.usage.completion_tokens, total_tokens=completion.usage.total_tokens)
+            response_model = completion.model
 
         return GenerateResponse(
             success=True,
             response=content,
-            model=completion.model,
+            model=response_model,
             usage=usage,
             is_mock=False
         )
@@ -257,24 +301,22 @@ async def generate_image_patch(request: ImagePatchRequest):
         openai_client = AsyncOpenAI(api_key=current_key)
     selected_model = request.model or os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
     try:
-        completion = await openai_client.chat.completions.create(
-            model=selected_model,
-            messages=[
-                {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": request.prompt},
-                    {"type": "image_url", "image_url": {"url": request.image_data_url, "detail": "high"}},
-                ]},
-            ],
-        )
+        if selected_model.startswith("gpt-6-"):
+            response = await generate_responses_text(selected_model, request.system_prompt, [{"role": "user", "content": [
+                {"type": "input_text", "text": request.prompt},
+                {"type": "input_image", "image_url": request.image_data_url, "detail": "high"},
+            ]}], json_mode=True)
+            return GenerateResponse(success=True, response=response.output_text or "", model=response.model, usage=responses_usage(response.usage))
+        completion = await openai_client.chat.completions.create(model=selected_model, messages=[
+            {"role": "system", "content": request.system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": request.prompt},
+                {"type": "image_url", "image_url": {"url": request.image_data_url, "detail": "high"}},
+            ]},
+        ])
         content = completion.choices[0].message.content or ""
-        usage = None
-        if completion.usage:
-            usage = UsageInfo(
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens,
-                total_tokens=completion.usage.total_tokens,
-            )
+        usage = UsageInfo(prompt_tokens=completion.usage.prompt_tokens,
+            completion_tokens=completion.usage.completion_tokens, total_tokens=completion.usage.total_tokens) if completion.usage else None
         return GenerateResponse(success=True, response=content, model=completion.model, usage=usage)
     except OpenAIAuthError as e:
         raise HTTPException(status_code=401, detail=f"OpenAI Authentication Failed: {str(e)}")

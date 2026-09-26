@@ -1,17 +1,41 @@
+import { sampleCatalog } from '../sampleCatalog';
+
 export const SFX_URL = 'http://localhost:8000/api/sfx';
 const FALLBACK_URL = 'http://127.0.0.1:8000/api/sfx';
+const SAMPLES_URL = 'http://localhost:8000/api/samples';
+
+/** Read the server's authoritative built-in sample filenames before asking the model to select one. */
+export async function requestAvailableSamples(signal?: AbortSignal): Promise<string[]> {
+  let response: Response;
+  try { response = await fetch(SAMPLES_URL, { signal }); }
+  catch (error) {
+    if (signal?.aborted) throw error;
+    response = await fetch('http://127.0.0.1:8000/api/samples', { signal });
+  }
+  const body: unknown = await response.json();
+  if (!response.ok || typeof body !== 'object' || body === null || !('samples' in body) || !Array.isArray(body.samples))
+    throw new Error('The API did not return its available built-in samples. Check that the server and Samples folder are running.');
+  const present = new Set(body.samples.filter((file: unknown): file is string => typeof file === 'string' && /^[\w.-]+\.(wav|aif|aiff|mp3|m4a|ogg)$/i.test(file)));
+  const samples = sampleCatalog.map(({ file }) => file).filter((file) => present.has(file));
+  if (!samples.length) throw new Error('The API found no available built-in audio samples.');
+  return samples;
+}
 
 export interface GeneratedSample {
   filename: string;
   audioUrl: string;
 }
+export interface SfxOptions { durationSeconds?: number; promptInfluence?: number }
 
 /** Requests a sound effect and returns the saved audio file served by the local API. */
-export async function requestSoundEffect(word: string, signal?: AbortSignal): Promise<GeneratedSample> {
+export async function requestSoundEffect(word: string, signal?: AbortSignal, options: SfxOptions = {}): Promise<GeneratedSample> {
+  if (!word.trim() || word.length > 450) throw new Error('Sound effect description must be between 1 and 450 characters.');
+  if (/^(?:only for\b|for sfx only\b|audible action of\b|literal acoustic\b|visible evidence supporting\b|concrete physical\b|short physical source\b|describe (?:a|the)\b)|\bsource\s*\+\s*(?:audible\s+)?action\b/i.test(word.trim()))
+    throw new Error('That is a prompt template instruction, not a sound. Describe an audible source and action from the artwork.');
   const request: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: word }),
+    body: JSON.stringify({ prompt: word, duration_seconds: options.durationSeconds, prompt_influence: options.promptInfluence }),
     signal,
   };
   let endpoint = SFX_URL;

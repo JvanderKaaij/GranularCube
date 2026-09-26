@@ -1,20 +1,30 @@
 import './style.css';
 import { AudioRack } from './audio/AudioRack';
 import { createGranularPanel, type GranularPanel } from './ui/GranularPanel';
-import { createBellPanel, type BellPanel } from './ui/BellPanel';
+import { createPhysicalPanel, type PhysicalPanel } from './ui/PhysicalPanel';
 import { masterControlDefinitions, type MasterParameters, type MasterControlDefinition } from './parameters';
 import { createMoodController, type MoodController } from './ai/MoodController';
 import { fitSampleWindow, morphParameters } from './ai/PatchTransition';
 import type { PatchPlan, PatchSnapshot } from './ai/PatchPlan';
-import type { BellParameters, Parameters } from './parameters';
+import type { PhysicalParameters, Parameters } from './parameters';
+import type { ApplicationOptions, ApplicationReport } from './ai/Composition';
+import { preparePatchSamples } from './ai/PatchPreparation';
+import { PatchEditor } from './ui/PatchEditor';
+import { createEffectPanel, type EffectPanel } from './ui/EffectPanel';
+import type { EffectKind, EffectValues } from './audio/EffectNode';
+import { ParameterLfoControl, updateParameterLfoDisplays } from './ui/ParameterLfoControl';
+import { parameterLfoValue, type ParameterLfoMap } from './audio/ParameterLfo';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App container missing');
 
-type PatchPanel = GranularPanel | BellPanel;
+type PatchPanel = GranularPanel | PhysicalPanel;
 
 const rack = new AudioRack();
 const panels = new Map<number, PatchPanel>();
+const effects = new Map<string, EffectPanel>();
+let nextEffectId = 1;
+const masterControls = masterControlDefinitions.filter((control) => control.key === 'gain');
 let nextModuleId = 1;
 const accents = ['#91c3cf', '#d3b182', '#b9a8d4', '#99c5a6'];
 
@@ -31,43 +41,54 @@ app.innerHTML = `
         <button class="rail-tool selected" type="button" title="Patch workspace" aria-label="Patch workspace">▦</button>
         <div class="rail-rule"></div>
         <button class="rail-tool rail-add" type="button" title="Add granular module" aria-label="Add granular module">+</button>
-        <button class="rail-tool rail-bell" type="button" title="Add bell module" aria-label="Add bell module">◌</button>
+        <button class="rail-tool rail-physical" type="button" title="Add physical module" aria-label="Add physical module">◌</button>
         <div class="rail-spacer"></div>
         <div class="rail-label">GC / 01</div>
       </nav>
       <main class="work-area">
         <div class="work-toolbar">
           <div class="path-label"><span>PROJECT</span><b>/</b><span>GRANULARCUBE</span><b>/</b><strong>PATCH 01</strong></div>
-          <div class="toolbar-right"><span id="module-count">01 MODULE</span><button id="stop-all" class="toolbar-button" type="button">■ STOP ALL</button><button id="add-module" class="toolbar-button primary" type="button">+ ADD GRANULAR~</button><button id="add-bell" class="toolbar-button primary" type="button">+ ADD BELL~</button><button id="show-mood" class="toolbar-button mood-link" type="button">◇ MOOD SETTINGS</button></div>
+          <div class="toolbar-right"><span id="module-count">01 MODULE</span><button id="stop-all" class="toolbar-button" type="button">■ STOP ALL</button><button id="add-module" class="toolbar-button primary" type="button">+ ADD GRANULAR~</button><button id="add-physical" class="toolbar-button primary" type="button">+ ADD PHYSICAL~</button><button id="show-mood" class="toolbar-button mood-link" type="button">◇ MOOD SETTINGS</button></div>
         </div>
-        <section class="patch-stage" id="patch-stage" aria-label="Audio patch workspace">
-          <div class="stage-caption"><span>PATCHING AREA</span><span>DRY / WET BUS · STEREO OUT</span></div>
-          <svg class="patch-cables" id="patch-cables" aria-hidden="true"></svg>
-          <div class="module-bank" id="module-bank"></div>
-          <div class="side-stack"><aside class="master-node" id="master-node" aria-label="Master mixer and reverb">
+        <div class="patch-tools"><span>ADD EFFECT</span><button class="toolbar-button" data-add-effect="filter">+ FILTER~</button><button class="toolbar-button" data-add-effect="delay">+ DELAY~</button><button class="toolbar-button" data-add-effect="reverb">+ REVERB~</button><button class="toolbar-button" id="arrange">ARRANGE</button><button class="toolbar-button" id="disconnect" disabled>DISCONNECT CABLE</button></div>
+        <div class="patch-help" id="patch-help" role="status">Drag headers to move nodes. Connect OUT → IN. Select a cable to disconnect it.</div>
+        <div class="patch-viewport"><section class="patch-stage" id="patch-stage" aria-label="Audio patch workspace">
+          <svg class="patch-cables" id="patch-cables" aria-label="Audio connections"></svg>
+          <aside class="master-node" id="master-node" aria-label="Master output">
             <div class="master-head"><span class="master-symbol">∑</span><div><span class="node-kicker">OUTPUT / BUS 01</span><h2>master~</h2></div></div>
-            <div class="master-flow"><span class="master-input-port" id="master-input-port" title="Audio input"></span><span>SUM</span><span class="flow-arrow">→</span><span>REVERB</span><span class="flow-arrow">→</span><span>OUT</span></div>
+            <div class="master-flow"><button type="button" class="port input-port" id="master-input-port" aria-label="Connect to master input">IN</button><span>SUM</span><span class="flow-arrow">→</span><span>STEREO OUT</span></div>
             <div class="master-section"><div class="master-section-title">INPUT CHANNELS <span id="input-count">01</span></div><div class="channel-list" id="channel-list"></div></div>
-            <div class="master-section"><div class="master-section-title">CHAMBER / REVERB</div><div id="reverb-controls" class="master-controls"></div><div class="master-hint">Shared effect after all synth modules</div></div>
             <div class="master-section master-output"><div class="master-section-title">OUTPUT</div><div id="output-controls" class="master-controls"></div><div class="output-readout"><span class="out-led"></span> AUDIO CONTEXT <span class="output-label">STEREO L / R</span></div></div>
-          </aside><div id="mood-mount"></div></div>
-          <div class="empty-state" id="empty-state" hidden><span>+</span><strong>EMPTY PATCH</strong><p>Add a synth module to route audio into the master bus.</p><button type="button">ADD GRANULAR~</button></div>
-        </section>
-        <footer class="status-bar"><span><i class="status-indicator"></i> PATCH READY</span><span id="active-count">0 ACTIVE</span><span>64 GRAINS / GRANULAR · 7 MODES / BELL</span><span class="status-right">AUDIO → MASTER BUS → STEREO OUT</span></footer>
+          </aside>
+        </section></div>
+        <div id="mood-mount" class="mood-dock" hidden></div>
+        <footer class="status-bar"><span><i class="status-indicator"></i> PATCH READY</span><span id="active-count">0 ACTIVE</span><span>SOURCES → EFFECTS → MASTER</span><span class="status-right">STEREO L / R</span></footer>
       </main>
     </div>
   </div>
 `;
 
 const stage = document.querySelector<HTMLElement>('#patch-stage')!;
-const moduleBank = document.querySelector<HTMLElement>('#module-bank')!;
 const masterInput = document.querySelector<HTMLElement>('#master-input-port')!;
 const cables = document.querySelector<SVGSVGElement>('#patch-cables')!;
 const channelList = document.querySelector<HTMLElement>('#channel-list')!;
-const emptyState = document.querySelector<HTMLElement>('#empty-state')!;
-let cableFrame = 0;
 let moodController: MoodController | null = null;
 let cancelPatchTransition: (() => void) | null = null;
+let motionEnabled = true;
+function manualEdit(): void { moodController?.cancelPending(); cancelPatchTransition?.(); }
+const editor = new PatchEditor(stage, cables, rack.graph, document.querySelector('#patch-help')!, document.querySelector('#disconnect')!, () => { manualEdit(); updatePatchState(); });
+editor.add('master', document.querySelector('#master-node')!, masterInput, undefined, 1450, 40);
+document.querySelector('#arrange')!.addEventListener('click', () => editor.arrange());
+let masterGainBase = rack.currentParameters.gain;
+let masterGainLfo: ParameterLfoMap = {};
+let masterGainLfoControl: ParameterLfoControl | null = null;
+function refreshParameterLfos(): void {
+  const time = rack.currentTime;
+  for (const panel of effects.values()) panel.engine.applyParameterLfos(time);
+  if (masterGainLfo.gain?.enabled) rack.setModulatedGain(parameterLfoValue(masterGainBase, 'master-gain', masterGainLfo.gain, time, 0, 1.5));
+  updateParameterLfoDisplays(time);
+}
+window.setInterval(refreshParameterLfos, 100);
 
 function format(value: number, unit = ''): string {
   return `${Number.isInteger(value) ? value : Number(value.toFixed(2))}${unit}`;
@@ -77,33 +98,39 @@ function addMasterControl(
   target: HTMLElement,
   definition: MasterControlDefinition,
 ): void {
-  const row = document.createElement('label');
+  const row = document.createElement('div');
   row.className = 'master-control';
   row.innerHTML = `<span class="master-control-head"><span>${definition.label}</span><output>${format(rack.currentParameters[definition.key], definition.unit)}</output></span><input data-master-param="${definition.key}" type="range" min="${definition.min}" max="${definition.max}" step="${definition.step}" value="${rack.currentParameters[definition.key]}" aria-label="Master ${definition.label.toLowerCase()}" />`;
   const input = row.querySelector<HTMLInputElement>('input')!;
   const output = row.querySelector<HTMLOutputElement>('output')!;
+  const lfo = new ParameterLfoControl(row.querySelector<HTMLElement>('.master-control-head')!, `master-${definition.key}`, input, (settings) => { masterGainLfo.gain = settings; }, (value) => format(value, definition.unit));
+  masterGainLfoControl = lfo;
+  masterGainLfo.gain = lfo.settings;
   input.addEventListener('input', () => {
     const value = Number(input.value);
+    masterGainBase = value;
+    masterGainLfoControl?.setBase(value);
     rack.setParameter(definition.key, value);
     output.value = format(value, definition.unit);
   });
   target.append(row);
 }
 
-const reverbControls = document.querySelector<HTMLElement>('#reverb-controls')!;
-for (const definition of masterControlDefinitions) {
-  addMasterControl(definition.key === 'gain' ? document.querySelector<HTMLElement>('#output-controls')! : reverbControls, definition);
+for (const definition of masterControls) {
+  addMasterControl(document.querySelector<HTMLElement>('#output-controls')!, definition);
 }
 
 function getPatchSnapshot(): PatchSnapshot {
-  return { master: rack.currentParameters, modules: [...panels.values()].map((panel) => panel.getSnapshot()) };
+  return { master: rack.currentParameters, modules: [...panels.values()].map((panel) => panel.getSnapshot()), effects: [...effects.values()].map((panel) => panel.getSnapshot()), connections: rack.graph.connections };
 }
 
 function applyMasterParameters(parameters: MasterParameters): void {
-  for (const definition of masterControlDefinitions) {
+  for (const definition of masterControls) {
     const input = document.querySelector<HTMLInputElement>(`[data-master-param="${definition.key}"]`)!;
     input.value = String(parameters[definition.key]);
     const value = Number(input.value);
+    masterGainBase = value;
+    masterGainLfoControl?.setBase(value);
     rack.setParameter(definition.key, value);
     input.closest('.master-control')!.querySelector<HTMLOutputElement>('output')!.value = format(value, definition.unit);
   }
@@ -115,27 +142,41 @@ async function applyPatchPlan(
   onProgress: (progress: number) => void,
   generatedSamples: Map<number, { keyword: string; audioUrl: string }> = new Map(),
   startImageModules = false,
-): Promise<void> {
+  options: ApplicationOptions = {},
+): Promise<ApplicationReport> {
+  options.signal?.throwIfAborted();
+  options.onPhase?.('decode');
+  const preparationStart = performance.now();
+  const transaction = await preparePatchSamples(plan, panels, getPatchSnapshot, generatedSamples, options.signal);
+  const prepared = transaction.entries;
+  await rack.resume();
+  options.signal?.throwIfAborted();
+  transaction.validate();
+  const decodeMs = performance.now() - preparationStart;
   const granularMorphs: Array<{ panel: GranularPanel; from: Parameters; to: Parameters }> = [];
-  const bellMorphs: Array<{ panel: BellPanel; from: BellParameters; to: BellParameters; sequence: number[]; changeSequence: boolean }> = [];
+  const physicalMorphs: Array<{ panel: PhysicalPanel; from: PhysicalParameters; to: PhysicalParameters; sequence: number[]; changeSequence: boolean }> = [];
   const startedForImage: PatchPanel[] = [];
+  const effectMorphs = (plan.effects ?? []).map((setting) => {
+    const panel = effects.get(setting.id);
+    if (!panel || panel.engine.type !== setting.type) throw new Error(`Effect ${setting.id} is no longer available`);
+    return { panel, from: panel.engine.parameters, to: setting.parameters };
+  });
   for (const setting of plan.modules) {
     const panel = panels.get(setting.id);
     if (setting.type === 'granular') {
       if (panel?.kind !== 'granular') throw new Error(`GRAIN ${setting.id} is no longer available`);
-      const generated = generatedSamples.get(setting.id);
-      const sampleChanged = generated
-        ? await panel.applyGeneratedSample(generated.keyword, generated.audioUrl, durationMs / 1000)
-        : await panel.applySample(setting.sample, durationMs / 1000);
-      if (panels.get(setting.id) !== panel) throw new Error(`GRAIN ${setting.id} was removed while loading its sample`);
+      const sample = prepared.find((item) => item.id === setting.id)!.sample!;
+      const from = panel.engine.currentParameters;
+      // New sample windows use the new duration throughout the morph.
+      if (sample.changed) { from.selectionStart = 0; from.selectionEnd = sample.durationMs; }
       granularMorphs.push({
         panel,
-        from: panel.engine.currentParameters,
-        to: fitSampleWindow(setting.parameters, panel.engine.sampleDurationMs, sampleChanged),
+        from,
+        to: fitSampleWindow(setting.parameters, sample.durationMs, sample.changed),
       });
     } else {
-      if (panel?.kind !== 'bell') throw new Error(`BELL ${setting.id} is no longer available`);
-      bellMorphs.push({
+      if (panel?.kind !== 'physical') throw new Error(`PHYSICAL ${setting.id} is no longer available`);
+      physicalMorphs.push({
         panel,
         from: panel.engine.currentParameters,
         to: setting.parameters,
@@ -145,6 +186,11 @@ async function applyPatchPlan(
       });
     }
   }
+  // Every fetch/decode and revision check has succeeded. Commit all buffers in one JS turn.
+  cancelPatchTransition?.();
+  for (const item of prepared) item.panel.engine.setMovement(null);
+  transaction.commit(durationMs / 1000);
+  options.onPhase?.('transition');
   if (startImageModules) {
     try {
       for (const morph of granularMorphs) {
@@ -154,7 +200,7 @@ async function applyPatchPlan(
         await morph.panel.start();
         startedForImage.push(morph.panel);
       }
-      for (const morph of bellMorphs) {
+      for (const morph of physicalMorphs) {
         if (morph.panel.engine.isPlaying) continue;
         morph.from.gain = 0;
         morph.panel.applyParameters(morph.from);
@@ -169,7 +215,7 @@ async function applyPatchPlan(
   const masterFrom = rack.currentParameters;
   const start = performance.now();
   const masterNode = document.querySelector<HTMLElement>('#master-node')!;
-  for (const { panel } of [...granularMorphs, ...bellMorphs]) panel.root.classList.add('morphing');
+  for (const { panel } of [...granularMorphs, ...physicalMorphs, ...effectMorphs]) panel.root.classList.add('morphing');
   masterNode.classList.add('morphing');
   let completed = false;
   try {
@@ -182,8 +228,11 @@ async function applyPatchPlan(
         settled = true;
         if (timer !== null) window.clearTimeout(timer);
         cancelPatchTransition = null;
+        options.signal?.removeEventListener('abort', onAbort);
         if (error) reject(error); else resolve();
       };
+      const onAbort = () => finish(new Error('Transition canceled'));
+      options.signal?.addEventListener('abort', onAbort, { once: true });
       cancelPatchTransition = () => finish(new Error('Transition interrupted by a manual edit.'));
       const tick = (): void => {
         try {
@@ -192,19 +241,22 @@ async function applyPatchPlan(
             if (panels.get(Number(panel.root.dataset.moduleId)) !== panel) throw new Error(`${panel.label} was removed during the transition`);
             panel.applyParameters(morphParameters(from, to, progress, ['filterType']));
           }
-          for (const { panel, from, to } of bellMorphs) {
+          for (const { panel, from, to } of physicalMorphs) {
             if (panels.get(Number(panel.root.dataset.moduleId)) !== panel) throw new Error(`${panel.label} was removed during the transition`);
-            panel.applyParameters(morphParameters(from, to, progress, ['rootNote']));
+            panel.applyParameters(morphParameters(from, to, progress, ['rootNote', 'filterType']));
           }
           if (progress >= 0.5 && !midpointApplied) {
             const remainingSeconds = durationMs / 2000;
-            for (const { panel, to } of granularMorphs) panel.engine.transitionReverbDecay(to.reverbDecay, remainingSeconds);
-            for (const { panel, to } of bellMorphs) panel.engine.transitionReverbDecay(to.reverbDecay, remainingSeconds);
-            rack.transitionReverbDecay(plan.master.reverbDecay, remainingSeconds);
-            for (const { panel, sequence, changeSequence } of bellMorphs) {
+            for (const { panel, to } of effectMorphs) if (panel.engine.type === 'reverb') panel.engine.transitionDecay(Number(to.decay), remainingSeconds);
+            for (const { panel, sequence, changeSequence } of physicalMorphs) {
               if (changeSequence) panel.applySequence(sequence);
             }
             midpointApplied = true;
+          }
+          for (const { panel, from, to } of effectMorphs) {
+            const values: EffectValues = morphParameters(from, to, progress, ['filterType']);
+            if (panel.engine.type === 'reverb') delete values.decay;
+            panel.applyParameters(values);
           }
           applyMasterParameters(morphParameters(masterFrom, plan.master, progress));
           onProgress(progress);
@@ -217,92 +269,99 @@ async function applyPatchPlan(
       tick();
     });
     completed = true;
+    for (const item of prepared) item.panel.engine.setMovement(options.movement ?? null);
   } finally {
     if (!completed) for (const panel of startedForImage) panel.stop();
-    for (const { panel } of [...granularMorphs, ...bellMorphs]) panel.root.classList.remove('morphing');
+    for (const { panel } of [...granularMorphs, ...physicalMorphs, ...effectMorphs]) panel.root.classList.remove('morphing');
     masterNode.classList.remove('morphing');
     updatePatchState();
   }
+  return { decodeMs, transitionMs: performance.now() - start, samples: prepared.flatMap((item) => item.sample ? [{ id: item.id, durationMs: item.sample.durationMs, changed: item.sample.changed }] : []) };
 }
 
 function updatePatchState(): void {
-  const count = panels.size;
+  const count = panels.size + effects.size;
   document.querySelector<HTMLElement>('#module-count')!.textContent = `${String(count).padStart(2, '0')} MODULE${count === 1 ? '' : 'S'}`;
-  document.querySelector<HTMLElement>('#input-count')!.textContent = String(count).padStart(2, '0');
+  const incoming = rack.graph.connections.filter((edge) => edge.to === 'master');
+  document.querySelector<HTMLElement>('#input-count')!.textContent = String(incoming.length).padStart(2, '0');
   const active = [...panels.values()].filter(({ engine }) => engine.isPlaying).length;
   document.querySelector<HTMLElement>('#active-count')!.textContent = `${active} ACTIVE`;
-  emptyState.hidden = count !== 0;
-  channelList.innerHTML = [...panels.entries()].map(([id, panel]) => {
-    const color = accents[(id - 1) % accents.length];
-    return `<div class="channel-row"><span class="channel-led ${panel.engine.isPlaying ? 'active' : ''}" style="--accent:${color}"></span><span>${panel.label}</span><small>${panel.engine.isPlaying ? 'RUN' : 'IDLE'}</small></div>`;
-  }).join('');
+  channelList.textContent = incoming.length ? incoming.map((edge) => effects.has(edge.from) ? `${effects.get(edge.from)!.engine.type}~ / ${edge.from}` : panels.get(Number(edge.from.split(':')[1]))?.label ?? edge.from).join(' · ') : 'No input cables';
   requestCableDraw();
   moodController?.updateOverview();
 }
 
-function drawCables(): void {
-  cableFrame = 0;
-  const stageRect = stage.getBoundingClientRect();
-  const inputRect = masterInput.getBoundingClientRect();
-  const endX = inputRect.left + inputRect.width / 2 - stageRect.left;
-  const endY = inputRect.top + inputRect.height / 2 - stageRect.top;
-  cables.setAttribute('viewBox', `0 0 ${stage.clientWidth} ${stage.offsetHeight}`);
-  cables.innerHTML = [...panels.entries()].map(([id, panel]) => {
-    const port = panel.outputPort.getBoundingClientRect();
-    const startX = port.left + port.width / 2 - stageRect.left;
-    const startY = port.top + port.height / 2 - stageRect.top;
-    const bend = Math.max(45, Math.min(170, (endX - startX) * 0.42));
-    const color = accents[(id - 1) % accents.length];
-    return `<path d="M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}" stroke="${color}" />`;
-  }).join('');
+function requestCableDraw(): void { editor.redraw(); }
+
+function addEffect(kind: EffectKind, x = 420, y = 360): string {
+  manualEdit();
+  const id = `fx${nextEffectId++}`;
+  const engine = rack.createEffect(id, kind);
+  const panel = createEffectPanel(id, engine, () => {
+    manualEdit(); rack.graph.remove(id); engine.dispose(); editor.remove(id); effects.delete(id); updatePatchState();
+  }, manualEdit);
+  effects.set(id, panel);
+  editor.add(id, panel.root, panel.inputPort, panel.outputPort, x, y);
+  updatePatchState();
+  return id;
 }
 
-function requestCableDraw(): void {
-  if (!cableFrame) cableFrame = requestAnimationFrame(drawCables);
+for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-add-effect]'))) {
+  button.addEventListener('click', () => {
+    const viewport = document.querySelector<HTMLElement>('.patch-viewport')!;
+    addEffect(button.dataset.addEffect as EffectKind, viewport.scrollLeft + 60 + effects.size % 5 * 24, viewport.scrollTop + 220 + effects.size % 5 * 24);
+    editor.message('Effect added. Connect its IN and OUT ports to include it in the audio route.');
+  });
 }
-
-const resizeObserver = new ResizeObserver(requestCableDraw);
-resizeObserver.observe(stage);
-resizeObserver.observe(moduleBank);
-window.addEventListener('resize', requestCableDraw);
-window.addEventListener('scroll', requestCableDraw, { passive: true });
 
 function removeModule(id: number): void {
   const panel = panels.get(id);
   if (!panel) return;
+  manualEdit();
   rack.removeModule(panel.engine);
-  resizeObserver.unobserve(panel.root);
-  panel.root.remove();
+  editor.remove(`source:${id}`);
   panels.delete(id);
   updatePatchState();
 }
 
 function mountPanel(id: number, panel: PatchPanel): void {
+  panel.engine.setMotionEnabled(motionEnabled);
   panel.root.style.setProperty('--accent', accents[(id - 1) % accents.length]);
+  const y = Math.max(40, ...[...panels.values()].map((existing) => existing.root.offsetTop + Math.max(220, existing.root.offsetHeight) + 70));
   panels.set(id, panel);
-  moduleBank.append(panel.root);
-  resizeObserver.observe(panel.root);
+  editor.add(`source:${id}`, panel.root, undefined, panel.outputPort, 40, y);
+  const filter = addEffect('filter', 410, y);
+  const reverb = addEffect('reverb', panel.kind === 'physical' ? 1070 : 740, y);
+  editor.connect(`source:${id}`, filter);
+  if (panel.kind === 'physical') {
+    const delay = addEffect('delay', 740, y);
+    editor.connect(filter, delay); editor.connect(delay, reverb);
+  } else editor.connect(filter, reverb);
+  editor.connect(reverb, 'master');
   updatePatchState();
 }
 
 function addGranular(): number {
+  manualEdit();
   const id = nextModuleId++;
-  mountPanel(id, createGranularPanel(id, rack.createGranular(), removeModule, updatePatchState, () => cancelPatchTransition?.()));
+  mountPanel(id, createGranularPanel(id, rack.createGranular(`source:${id}`), removeModule, updatePatchState, manualEdit));
   return id;
 }
 
-function addBell(): number {
+function addPhysical(): number {
+  manualEdit();
   const id = nextModuleId++;
-  mountPanel(id, createBellPanel(id, rack.createBell(), removeModule, updatePatchState));
+  mountPanel(id, createPhysicalPanel(id, rack.createPhysical(`source:${id}`), removeModule, updatePatchState));
   return id;
 }
 
 document.querySelector<HTMLButtonElement>('#add-module')!.addEventListener('click', addGranular);
-document.querySelector<HTMLButtonElement>('#add-bell')!.addEventListener('click', addBell);
+document.querySelector<HTMLButtonElement>('#add-physical')!.addEventListener('click', addPhysical);
 document.querySelector<HTMLButtonElement>('.rail-add')!.addEventListener('click', addGranular);
-document.querySelector<HTMLButtonElement>('.rail-bell')!.addEventListener('click', addBell);
-emptyState.querySelector('button')!.addEventListener('click', addGranular);
+document.querySelector<HTMLButtonElement>('.rail-physical')!.addEventListener('click', addPhysical);
 document.querySelector<HTMLButtonElement>('#stop-all')!.addEventListener('click', () => {
+  moodController?.cancelPending();
+  cancelPatchTransition?.();
   for (const panel of panels.values()) panel.stop();
   updatePatchState();
 });
@@ -310,27 +369,27 @@ document.querySelector<HTMLButtonElement>('#stop-all')!.addEventListener('click'
 for (const eventName of ['input', 'change']) {
   app.addEventListener(eventName, (event) => {
     if (event.target instanceof Element && event.target.closest('.module-card, .master-node')) {
-      if (event.target.matches('.module-controls input, .module-controls select, .master-node input')) cancelPatchTransition?.();
+      if (!event.target.closest('.parameter-lfo') && event.target.matches('.module-controls input, .module-controls select, .physical-model select, .master-node input, .effect-controls input, .effect-controls select, .effect-bypass input')) {
+        moodController?.cancelPending();
+        cancelPatchTransition?.();
+        const card = event.target.closest<HTMLElement>('.module-card');
+        if (card) panels.get(Number(card.dataset.moduleId))?.engine.setMovement(null);
+      }
       moodController?.updateOverview();
     }
   });
 }
 
-moodController = createMoodController(getPatchSnapshot, applyPatchPlan, {
-  prepareImageLayers() {
-    const existingGrains = [...panels.values()].filter((panel) => panel.kind === 'granular').length;
-    const added = Array.from({ length: Math.max(0, 3 - existingGrains) }, () => addGranular());
-    if (![...panels.values()].some((panel) => panel.kind === 'bell')) added.push(addBell());
-    return added;
-  },
-  discardImageLayers(ids) {
-    for (const id of ids) removeModule(id);
-  },
+moodController = createMoodController(getPatchSnapshot, applyPatchPlan, (enabled) => {
+  motionEnabled = enabled;
+  for (const panel of panels.values()) panel.engine.setMotionEnabled(enabled);
 });
 document.querySelector<HTMLElement>('#mood-mount')!.append(moodController.root);
 document.querySelector<HTMLButtonElement>('#show-mood')!.addEventListener('click', () => {
-  moodController?.root.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  moodController?.root.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true });
+  const dock = document.querySelector<HTMLElement>('#mood-mount')!;
+  dock.hidden = !dock.hidden;
+  document.querySelector('#show-mood')!.setAttribute('aria-expanded', String(!dock.hidden));
+  if (!dock.hidden) moodController?.root.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true });
 });
 
 addGranular();

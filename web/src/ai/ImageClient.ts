@@ -9,7 +9,7 @@ export interface ImagePatchResponse {
   is_mock?: boolean;
 }
 
-export async function requestImagePatch(prompt: string, systemPrompt: string, file: File, signal?: AbortSignal): Promise<ImagePatchResponse> {
+export async function requestImagePatch(prompt: string, systemPrompt: string, file: File, signal?: AbortSignal, model?: string): Promise<ImagePatchResponse> {
   if (!IMAGE_TYPES.has(file.type)) throw new Error('Choose a PNG, JPEG, or WebP image.');
   if (!file.size || file.size > MAX_IMAGE_BYTES) throw new Error('Image must be smaller than 8 MB.');
   const imageDataUrl = await new Promise<string>((resolve, reject) => {
@@ -24,7 +24,7 @@ export async function requestImagePatch(prompt: string, systemPrompt: string, fi
   const request: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, system_prompt: systemPrompt, image_data_url: imageDataUrl }),
+    body: JSON.stringify({ prompt, system_prompt: systemPrompt, image_data_url: imageDataUrl, ...(model ? { model } : {}) }),
     signal,
   };
   let response: Response;
