@@ -15,7 +15,7 @@ export function defaultParameterLfo(key: string): ParameterLfoSettings {
   return {
     enabled: activeByDefault.has(key),
     periodSeconds: isModuleGain ? 160 + (hash(key) % 81) : 72 + (hash(key) % 55),
-    depth: isModuleGain ? 0.28 : 0.55,
+    depth: isModuleGain ? 0.55 : 0.8,
     waveform: 'sine',
     phaseRadians: Math.random() * Math.PI * 2,
   };

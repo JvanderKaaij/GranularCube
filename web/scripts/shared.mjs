@@ -26,5 +26,6 @@ export const buildOptions = {
 export async function prepareOutput() {
   await mkdir(outputRoot, { recursive: true });
   await copyFile(join(webRoot, 'index.html'), join(outputRoot, 'index.html'));
+  await copyFile(join(webRoot, 'phase-vocoder-processor.js'), join(outputRoot, 'phase-vocoder-processor.js'));
   await cp(samplesRoot, outputRoot, { recursive: true });
 }

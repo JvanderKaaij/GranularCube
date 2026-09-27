@@ -306,6 +306,9 @@ input[type='range']::-moz-range-thumb { width: 9px; height: 17px; background: va
 .effect-controls select { background: #202b2b; color: #d8e6e3; width: 100%; padding: 6px; margin-top: 9px; border: 1px solid #617675; }
 .effect-bypass { color: #a9bdb6; font: 10px var(--mono); padding: 12px; }
 .effect-bypass label { display: flex; align-items: center; gap: 7px; }
+.spectral-freeze { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; color: #bdd3dc; font: 9px var(--mono); }
+.spectral-freeze label { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.spectral-status { color: #9bb0b6; font: 8px var(--mono); text-align: right; }
 .effect-card.bypassed .module-head { opacity: .55; }
 .parameter-lfo-host { position: relative; }
 .module-card.lfo-open, .master-node.lfo-open { overflow: visible; z-index: 20 !important; }

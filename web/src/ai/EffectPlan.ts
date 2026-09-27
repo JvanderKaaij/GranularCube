@@ -38,6 +38,10 @@ export function parseEffects(value: unknown, snapshot: PatchSnapshot): EffectPla
       if (!['lowpass', 'highpass', 'bandpass', 'notch'].includes(raw.parameters.filterType)) throw new Error(`${raw.id}.filterType must be lowpass, highpass, bandpass or notch`);
       parameters.filterType = raw.parameters.filterType;
     }
+    if (current.type === 'spectral') {
+      if (typeof raw.parameters.freeze !== 'boolean') throw new Error(`${current.id}.freeze must be true or false`);
+      parameters.freeze = raw.parameters.freeze;
+    }
     return { id: current.id, type: current.type, parameters };
   });
 }

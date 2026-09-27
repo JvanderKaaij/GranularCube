@@ -124,7 +124,7 @@ export function buildParameterContext(snapshot: PatchSnapshot): object {
       { key: 'model', allowed: ['bell', 'percussion', 'string'], moodEffect: parameterMoodDescriptions.model },
       ...(!modular ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : []),
     ],
-    effects: modular ? effectRouting(snapshot).map((effect) => ({ ...effect, controls: effectControls[effect.type], discrete: effect.type === 'filter' ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : [] })) : undefined,
+    effects: modular ? effectRouting(snapshot).map((effect) => ({ ...effect, controls: effectControls[effect.type], discrete: effect.type === 'filter' ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : effect.type === 'spectral' ? [{ key: 'freeze', allowed: [false, true], moodEffect: 'Captures and sustains the current spectral frame. Use for a held, evolving tone; release to return to live spectral input.' }] : [] })) : undefined,
     connections: snapshot.connections,
     perModuleWindows: snapshot.modules.flatMap((m) => m.type === 'granular' ? [{ id: m.id, currentSample: m.sample, min: 0, max: Math.ceil(m.sampleDurationMs), unit: 'ms', newSample: 'Set selectionStart=selectionEnd=0 until the new sample is decoded' }] : []),
     interpretation: 'Ranges are inclusive. For every parameter, choose a value inside its range and on its step. Min/max pairs must be ordered.',

@@ -35,6 +35,12 @@ const retiredGuidance: [string, string][] = [
   ['The response skeleton deliberately has an empty sequence; replace it with 4–16 composed integer offsets. Never return that empty skeleton or copy the active pattern.',
     'Compose 4–16 integer offsets using the supplied limits. Do not copy the active pattern.'],
   ['Return the requested schema exactly.', 'Return composed values in the structure defined by outputSchema.'],
+  ['Work from each voice\'s role and sonic evidence. A bed needs sustained overlap and modest level; a texture supplies restrained variation; a focal source must retain identity; an accent leaves room. Coordinate grain length and targetOverlap rather than independently guessing density. Density is derived locally from targetOverlap / mean grain length in seconds. Requested overlap is 0.05–8. Use differences in grain duration, envelope range, filter bandwidth and wetness to separate roles.',
+    'Keep every source clearly audible in the mix. As a starting point, use module output gain around 0.45–0.75 for beds and textures, 0.55–0.85 for focal voices, and 0.35–0.65 for accents, within the supplied range. Raise a quiet source’s module gain before making its other parameters extreme; preserve role contrast and reduce level only when overlap or combined sources make the mix crowded.'],
+  ['Amp range is per grain; overlapping grains add energy. Never compensate for excessive overlap by raising gain.',
+    'Amp range is per grain; overlapping grains add energy, so keep overlap intentional, but do not default every module to a quiet level.'],
+  ['The master gain and module gain are ceilings, not targets to maximize.',
+    'Keep master headroom, while using the module-gain ranges above to make sources clearly audible.'],
 ];
 
 export function createPromptEditor(): PromptEditor {

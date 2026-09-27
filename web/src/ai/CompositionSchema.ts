@@ -5,6 +5,7 @@ import { effectControls, isSourceEffectParameter } from '../audio/EffectNode';
 type Schema = Record<string, unknown>;
 const text = (maxLength = 900): Schema => ({ type: 'string', minLength: 1, maxLength });
 const number = (minimum: number, maximum: number): Schema => ({ type: 'number', minimum, maximum });
+const boolean = (): Schema => ({ type: 'boolean' });
 const enumeration = (values: readonly (string | number)[]): Schema => ({ enum: values });
 const object = (properties: Record<string, Schema>, required = Object.keys(properties)): Schema =>
   ({ type: 'object', properties, required, additionalProperties: false });
@@ -87,7 +88,7 @@ export function parameterOutputSchema(snapshot: PatchSnapshot, sources: ChosenSo
       type: 'array', minItems: snapshot.effects!.length, maxItems: snapshot.effects!.length,
       items: snapshot.effects!.length ? { oneOf: snapshot.effects!.map((effect) => object({
         id: { const: effect.id }, type: { const: effect.type }, intent: text(),
-        parameters: object({ ...Object.fromEntries(effectControls[effect.type].map((control) => [control.key, number(control.min, control.max)])), ...(effect.type === 'filter' ? { filterType: enumeration(filterModes) } : {}) }),
+        parameters: object({ ...Object.fromEntries(effectControls[effect.type].map((control) => [control.key, number(control.min, control.max)])), ...(effect.type === 'filter' ? { filterType: enumeration(filterModes) } : {}), ...(effect.type === 'spectral' ? { freeze: boolean() } : {}) }),
       })) } : false,
       allOf: snapshot.effects!.map((effect) => ({ contains: { type: 'object', properties: { id: { const: effect.id } }, required: ['id'] }, minContains: 1, maxContains: 1 })),
     } } : {}),

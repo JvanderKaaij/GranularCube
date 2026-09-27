@@ -9,16 +9,29 @@ export interface EffectPanel {
 }
 export function createEffectPanel(id: string, engine: EffectNode, remove: () => void, edited: () => void): EffectPanel {
   const root = document.createElement('article'); root.className = 'module-card effect-card';
-  root.style.setProperty('--accent', { delay: '#d3b182', filter: '#99c5a6', reverb: '#b9a8d4' }[engine.type]);
-  root.innerHTML = `<div class="module-head"><div class="module-identity"><span class="module-icon">${{ delay: '↔', filter: '⌁', reverb: '≋' }[engine.type]}</span><div><span class="module-kicker">EFFECT / ${id.toUpperCase()}</span><h2>${engine.type}~</h2></div></div><div class="module-actions"><button type="button" class="icon-button remove-button" aria-label="Remove ${id}">×</button></div></div>
+  root.style.setProperty('--accent', { delay: '#d3b182', filter: '#99c5a6', reverb: '#b9a8d4', spectral: '#8eb9d6' }[engine.type]);
+  root.innerHTML = `<div class="module-head"><div class="module-identity"><span class="module-icon">${{ delay: '↔', filter: '⌁', reverb: '≋', spectral: '⌁·' }[engine.type]}</span><div><span class="module-kicker">EFFECT / ${id.toUpperCase()}</span><h2>${engine.type === 'spectral' ? 'spectral~' : `${engine.type}~`}</h2></div></div><div class="module-actions"><button type="button" class="icon-button remove-button" aria-label="Remove ${id}">×</button></div></div>
     <div class="module-flow"><button type="button" class="port input-port" aria-label="Connect to ${id} input">IN</button><span>STEREO</span><button type="button" class="port output-port" aria-label="Connect ${id} output">OUT</button></div>
-    <div class="module-controls effect-controls"></div><div class="module-section effect-bypass"><label><input type="checkbox" /> BYPASS</label></div>`;
+    <div class="module-controls effect-controls"></div>${engine.type === 'spectral' ? '<div class="module-section spectral-freeze"><label><input type="checkbox" /> FREEZE SPECTRUM</label><span class="spectral-status" role="status"></span></div>' : ''}<div class="module-section effect-bypass"><label><input type="checkbox" /> BYPASS</label></div>`;
   root.querySelector('.remove-button')!.addEventListener('click', remove);
   const controls = root.querySelector<HTMLElement>('.effect-controls')!;
+  const freeze = root.querySelector<HTMLInputElement>('.spectral-freeze input');
+  const spectralStatus = root.querySelector<HTMLElement>('.spectral-status');
   const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const outputs = new Map<string, HTMLOutputElement>();
   const lfos: ParameterLfoMap = {};
   const lfoByKey = new Map<string, ParameterLfoControl>();
+  if (engine.type === 'spectral') {
+    freeze!.checked = Boolean(engine.parameters.freeze);
+    freeze!.addEventListener('change', () => { edited(); engine.set('freeze', freeze!.checked); });
+    if (spectralStatus) {
+      spectralStatus.textContent = engine.status;
+      const statusTimer = window.setInterval(() => {
+        if (!root.isConnected) { window.clearInterval(statusTimer); return; }
+        spectralStatus.textContent = engine.status;
+      }, 500);
+    }
+  }
   if (engine.type === 'filter') {
     const label = document.createElement('label'); label.className = 'control';
     label.innerHTML = `<span class="control-label">MODE</span><select aria-label="${id} filter mode"><option value="lowpass">Low-pass</option><option value="highpass">High-pass</option><option value="bandpass">Band-pass</option><option value="notch">Notch</option></select>`;
@@ -38,6 +51,7 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
   const bypass = root.querySelector<HTMLInputElement>('.effect-bypass input')!;
   bypass.addEventListener('change', () => { edited(); engine.setBypass(bypass.checked); root.classList.toggle('bypassed', bypass.checked); });
   function render(): void {
+    if (freeze) freeze.checked = Boolean(engine.parameters.freeze);
     for (const [key, input] of inputs) {
       const value = engine.parameters[key]; input.value = String(value);
       lfoByKey.get(key)?.setBase(Number(value));
