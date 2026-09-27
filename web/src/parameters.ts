@@ -139,6 +139,7 @@ export interface PhysicalControlDefinition {
   min: number;
   max: number;
   step: number;
+  scale?: 'linear' | 'log';
   unit?: string;
 }
 
@@ -200,7 +201,7 @@ export const physicalControlGroups: { title: string; controls: PhysicalControlDe
   {
     title: 'Tone filter',
     controls: [
-      { key: 'filterCutoff', label: 'Cutoff', min: 40, max: 20000, step: 1, unit: 'Hz' },
+      { key: 'filterCutoff', label: 'Cutoff · log', min: 40, max: 20000, step: 1, scale: 'log', unit: 'Hz' },
       { key: 'filterResonance', label: 'Resonance', min: 0.1, max: 12, step: 0.1, unit: 'Q' },
     ],
   },

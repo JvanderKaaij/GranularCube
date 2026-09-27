@@ -10,18 +10,21 @@ npm install
 npm run dev
 ```
 
-Open the local address printed by the dev server. Each **granular~** module has independent sample, parameter, and playback controls. Use **+ ADD GRANULAR~** or **+ ADD PHYSICAL~** to run instruments in parallel, or **■ STOP ALL** to stop every module. Browsers require a click before audio output starts. Restart the dev server after adding or changing files in `../Samples`.
+Open the local address printed by the dev server. Each **granular~** module has independent sample, parameter, and playback controls. The left module library groups **INSTRUMENTS** in blue and **EFFECTS** in amber, separated by a divider. Click **granular~**, **physical~**, or **piano_sampler~** to add an instrument, or **■ STOP ALL** to stop every module. Browsers require a click before audio output starts. Restart the dev server after adding or changing built-in granular files in `../Samples`; piano keys are served directly by the Python server.
 
 ## Patching
 
 - Drag a node header to move it. Focus a header and use arrow keys (Shift for larger steps) to move it with the keyboard.
 - Click or drag **OUT** to an effect or master **IN**. Outputs can feed several nodes and inputs can sum several sources. Duplicate cables and feedback cycles are rejected; use delay feedback for repeats.
 - Select a cable and press **Delete**, **Backspace**, or **DISCONNECT CABLE**. **Escape** cancels patching. Removing an effect removes its cables; bypassing it keeps the route intact.
-- Use the effect toolbar to add filter~, delay~ or reverb~. New effects start disconnected. **CONTROLS** expands each node; **ARRANGE** lays nodes out along the signal paths. Scroll the canvas for larger patches.
-- New granular sources start with **granular → filter → reverb → master**. New physical sources start with **physical → filter → delay → reverb → master**. These are editable initial routes. Effects can be shared between sources and survive source removal.
-- **MOOD SETTINGS** opens/closes the composition and prompt editor. Layout and routing are currently held for the page session; reloading starts a fresh patch.
+- Use **EFFECTS** in the left library to add filter~, delay~, reverb~ or spectral~. New effects start disconnected. **CONTROLS** expands each node; **ARRANGE** lays nodes out along the signal paths. Scroll the canvas for larger patches. The library scrolls independently on shorter screens.
+- New granular sources start with **granular → filter → reverb → master**. New physical and piano sources start with **source → filter → delay → reverb → master**. These are editable initial routes. Effects can be shared between sources and survive source removal.
+- **MOOD SETTINGS** opens/closes the composition and prompt editor. **CONFIG** opens setup storage and model choices. Close either window with its × button or Escape.
+- Every instrument, effect and master node has an **IGNORE LLM** checkbox, visible even when its controls are collapsed. Checked nodes retain their current base parameters, samples, physical modes/sequences, piano gestures and evolution through painting and mood compositions. Existing LFOs keep running, and manual edits remain available. The model sees protected nodes as musical/routing context but only composes editable nodes; protected granular voices do not request or receive new SFX. A shared effect remains independently editable unless its own checkbox is checked. Changing the checkbox cancels an in-progress composition or transition.
 
 Granular source controls cover timing, sample window, amplitude and level. Grain length, source position and amplitude have two-handle range sliders. Source output is dry; the standalone filter colors the summed grains. The reverb node provides a diffuse, gently modulated stereo tail with wet/dry and decay controls.
+
+Filter cutoff sliders use logarithmic spacing: 20, 200, 2000 and 20000 Hz are evenly spaced across the filter slider, giving low frequencies much more room. LFOs move the thumb on that same scale. Audio parameters, displayed frequencies and saved setups continue to use Hz.
 
 The **physical~** module is a modal physical-modeling synth with Bell, Percussive body, and Plucked string models. **STRIKE** plays the root note; **PLAY** runs the displayed sequence. The model can change with each composition. Exciter and resonator controls shape the attack, pitch and tone; active voices finish naturally. Independent delay nodes alternate softened repeats left and right. Their echo level is added alongside the direct signal. New delay nodes use 0.62 echo level, 0.65 feedback and 0.75 s spacing. When composing a bell/string voice, the first connected active delay keeps at least 0.55 echo level, 0.58 feedback and 0.5–1.2 s spacing. Manual controls remain freely adjustable, and the model preserves bypass and routing. Sparse notes and shorter resonator decays let echoes carry the atmosphere.
 
@@ -30,6 +33,46 @@ npm run build
 ```
 
 `dist/` is a static website. A sample URL from another host needs CORS permission from that host.
+
+## Piano sampler
+
+**piano_sampler~** is a dry sample instrument with mapped keys and occasional chord gestures. The supplied `../Samples/piano/UprightPianoKW-small-bright-20190703.sfz` maps 26 recordings across all 88 keys, A0–C8 (MIDI 21–108). The server selects the single SFZ automatically, reads key zones and root pitches, and confirms the referenced files exist. The UI shows playable keys and recording count separately. The flattened WAV layout is supported without changing the SFZ. Add the instrument and use **REFRESH BANK** after updating recordings or the SFZ.
+
+Without an SFZ, filenames can be note names such as `A3.wav`, `C#4.wav`, `Db4.wav` (C4 = MIDI 60), or MIDI numbers such as `57.wav`. Optional prefixes separated by an underscore, space or hyphen are supported. An explicit `Samples/piano/bank.json` can list `{midi, filename, rootMidi}` mappings or select an SFZ by filename; that folder's README describes the supported subset. Duplicate key assignments and overlapping SFZ zones are rejected. Velocity controls level; multiple recording layers are not yet supported.
+
+**PLAY** starts irregular chord appearances, initially 6–30 seconds apart. Both pause controls and their LFOs stay within 6–30 seconds; the LLM receives these same ranges. Older saved setups with longer valid pauses are capped to 30 seconds on load. **PREVIEW** plays the first gesture once. Controls set minimum/maximum pauses between chord starts, hold, release, stereo spread and gain; every control has its own LFO and module gain always moves slowly. Each note selects its mapped recording and plays at `2 ** ((midi - rootMidi) / 12)`. Lower SFZ regions loop through hold and release using the original WAV loop times; higher regions decay naturally, with duration adjusted for pitch. The first bank load uses the SFZ release default (0.6 s for this upright), after which manual/LLM controls can change it. Missing samples and invalid loops prevent application of a new plan before the current soundscape is changed. Only recordings needed by the requested gestures are decoded, once per filename even when several notes share one recording. Playback caps concurrent notes and skips missed appearances after background tab stalls.
+
+The LLM gets every playable MIDI key, whether it can sustain, and bank metadata, then composes 1–8 complementary gestures with 2–8 distinct notes each. It requests sounding pitches; transposition is automatic, so harmony is not restricted to recorded roots. Every note has `midi`, `offsetMs` from the chord onset, and `velocity` (0.05–1); the first onset is zero and the whole attack span is at most 2000 ms. The prompt connects voicing, register, contour, onset span and pauses to the painting/mood, without a populated chord example. Gesture choices change at the transition midpoint after all required keys have decoded. Currently ringing notes finish. A painting starts a stopped piano after the transition; text compositions preserve transport state. A bank with fewer than two keys remains silent while the rest of the patch can compose normally.
+
+Expand **CONTROLS → EDIT GESTURE JSON** to inspect or manually apply the same data format. For the requested A3–C4–E4–A4 ascent over 180 ms, one gesture is:
+
+```json
+{
+  "label": "Open minor ascent",
+  "notes": [
+    { "midi": 57, "offsetMs": 0,   "velocity": 0.50 },
+    { "midi": 60, "offsetMs": 60,  "velocity": 0.46 },
+    { "midi": 64, "offsetMs": 120, "velocity": 0.48 },
+    { "midi": 69, "offsetMs": 180, "velocity": 0.42 }
+  ]
+}
+```
+
+The editor holds an array of these gesture objects. This documentation example is not inserted into LLM prompts. Saved setups preserve root pitches, loop times, bank metadata, gestures, controls, LFOs and routing; recordings remain in `Samples/piano/`. Exact passages from older saved prompts that prohibited piano transposition/loops are migrated when loaded.
+
+## Saved setups
+
+Open **CONFIG**, enter a setup name, and use **SAVE NEW** to store an experiment on the running Python server. Select a saved setup to **LOAD SELECTED** or **UPDATE SELECTED** with the current patch. Saving a new setup preserves your other experiments; updating replaces the selected setup. Setup names do not need to be unique.
+
+**IGNORE LLM** choices are stored with each node in the server setup and restored on load/startup. Use **SAVE NEW** or **UPDATE SELECTED** after changing them. Older setups default to allowing LLM changes.
+
+Each parameter also has a small lock button next to its **∿** LFO button. Amber means **ignore LLM**: its authored base value stays fixed through mood/painting composition, validation, level balancing and transitions. Manual adjustments and its existing LFO still work. Modes, spectral freeze, the granular sample, physical note sequence and piano chord gestures have the same lock control. The whole-node checkbox takes precedence. Locks are saved/restored with the server setup; older setups start unlocked. Changing a lock cancels a pending request or transition. A locked source-window endpoint retains its current recording so that the fixed window remains valid; an unlocked partner in a min/max pair adjusts to preserve the ordering.
+
+A setup includes every source and effect, authored parameter values, physical modes and note sequences, effect bypass, audio cables, node positions and expanded/collapsed states, per-parameter LFO settings and phases, slow-evolution settings, master level, mood intention, transition time, editable prompts, and both model choices. Generated, uploaded, and URL-loaded samples are stored as PCM WAV assets on the server; built-in samples reference the files in `../Samples`. Loading prepares and decodes all referenced audio before replacing the current patch. A missing sample or an edit made during preparation leaves the current patch in place.
+
+**USE SELECTED AT STARTUP** makes a saved experiment the initial patch for future page loads. It does not change the current patch. No saved setup becomes the startup setup automatically. **USE BUILT-IN STARTUP** clears that preference. Startup loads with audio paused; **LOAD SELECTED** restores the saved source playback states. The server library lives in `server/data/setups/`, with audio in `server/data/setup_audio/`. These local data folders are ignored by Git. Back up both folders together; retain built-in sample files as well.
+
+Model selectors are in **CONFIG**, separately for mood/parameter composition and painting interpretation. Changes apply to the next composition and are persisted when you save or update a setup. A setup marked for startup restores these choices when the page opens.
 
 ## Composition pipeline
 
@@ -59,7 +102,7 @@ PROMPTS · LAST COMPOSITION REQUESTS shows the actual system and request text in
 
 The existing server routes are reused: image interpretation uses /api/image-patch and OPENAI_VISION_MODEL, text composition uses /api/chat and OPENAI_MODEL, and generated audio uses /api/sfx with ELEVENLABS_API_KEY. The client now follows the server's configured text model instead of hardcoding a model name. Image files remain limited to 8 MB. A physical-only patch can interpret an image without an SFX request.
 
-OPENAI MODELS in Mood Settings chooses the model separately for mood/parameter text and painting interpretation. Choices persist in browser storage. GPT-6 Astra, Sol and Luna use the OpenAI Responses API for JSON and image input; GPT-4.1, GPT-4.1 mini and GPT-4o mini use Chat Completions. Model access depends on the configured OpenAI API key and project.
+OPENAI MODELS in Config chooses the model separately for mood/parameter text and painting interpretation. Choices persist in server-saved setups. GPT-6 Astra, Sol and Luna use the OpenAI Responses API for JSON and image input; GPT-4.1, GPT-4.1 mini and GPT-4o mini use Chat Completions. Model access depends on the configured OpenAI API key and project.
 
 Run npm run test:patch for composition, ranked sample choices, presets, overlap/level limits, a two-hour bounded modulation simulation, preparation failures, stale patches, and transition interpolation. Run npm run test:sfx for the SFX contract. These checks make no paid API calls. Use a recent Node version (18 or later for the Response API in the SFX check) and install dependencies on the platform where they will run.
 

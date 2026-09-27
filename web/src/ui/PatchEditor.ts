@@ -1,6 +1,8 @@
 import type { AudioGraph } from '../audio/AudioGraph';
+import { ignoredParameterKeys, applyParameterLocks } from './ParameterLock';
 
-interface NodeView { id: string; root: HTMLElement; input?: HTMLElement; output?: HTMLElement; x: number; y: number }
+interface NodeView { id: string; root: HTMLElement; input?: HTMLElement; output?: HTMLElement; x: number; y: number; ignoreLlm: boolean }
+export interface NodeLayout { x: number; y: number; collapsed: boolean; ignoreLlm?: boolean; ignoredParameters?: string[] }
 const svgNS = 'http://www.w3.org/2000/svg';
 
 /** Pointer/keyboard patching and node placement. AudioGraph remains the routing authority. */
@@ -35,7 +37,7 @@ export class PatchEditor {
   }
   message(text: string, error = false): void { this.status.textContent = text; this.status.classList.toggle('error', error); }
   add(id: string, root: HTMLElement, input: HTMLElement | undefined, output: HTMLElement | undefined, x: number, y: number): void {
-    const node = { id, root, input, output, x, y }; this.nodes.set(id, node);
+    const node = { id, root, input, output, x, y, ignoreLlm: false }; this.nodes.set(id, node);
     root.classList.add('patch-node', 'node-collapsed'); root.dataset.nodeId = id;
     this.stage.append(root); this.place(node, x, y);
     const head = root.querySelector<HTMLElement>('.module-head, .master-head')!;
@@ -44,6 +46,21 @@ export class PatchEditor {
     toggle.setAttribute('aria-expanded', 'false'); toggle.setAttribute('aria-label', `Toggle ${id} controls`);
     toggle.addEventListener('click', () => { root.classList.toggle('node-collapsed'); toggle.setAttribute('aria-expanded', String(!root.classList.contains('node-collapsed'))); this.redraw(); });
     head.append(toggle);
+    const policy = document.createElement('div'); policy.className = 'node-llm-policy';
+    policy.innerHTML = '<label><input type="checkbox" /> IGNORE LLM</label><span class="node-llm-state">FOLLOW MOOD</span>';
+    policy.title = 'Keep this node’s current parameters, sample, notes and evolution during compositions. Manual controls and existing LFOs still work. Save the setup in Config to keep this choice.';
+    const ignore = policy.querySelector<HTMLInputElement>('input')!;
+    ignore.setAttribute('aria-label', `Ignore LLM changes for ${root.querySelector('h2')?.textContent ?? id} (${id})`);
+    ignore.addEventListener('change', () => {
+      this.setIgnored(node, ignore.checked); this.changed();
+      this.message(ignore.checked ? `${id}: current settings are protected from composition changes. Save the setup to keep this choice.` : `${id}: follows composition settings again.`);
+    });
+    root.querySelector('.module-flow, .master-flow')!.after(policy);
+    root.addEventListener('parameter-lock-change', (event) => {
+      const { key, ignored } = (event as CustomEvent<{ key: string; ignored: boolean }>).detail;
+      this.changed();
+      this.message(`${id}.${key}: ${ignored ? 'protected from LLM changes' : 'follows mood again'}. Save the setup to keep this choice.`);
+    });
     const bringToFront = () => { root.style.zIndex = String(++this.zIndex); };
     // Controls and ports also count as interaction, not just dragging the header.
     root.addEventListener('pointerdown', bringToFront);
@@ -86,6 +103,30 @@ export class PatchEditor {
     this.select(null); this.redraw();
   }
   connect(from: string, to: string): void { this.graph.connect(from, to); this.redraw(); }
+  isIgnored(id: string): boolean { return this.nodes.get(id)?.ignoreLlm ?? false; }
+  get ignoredNodes(): string[] { return [...this.nodes.values()].filter((node) => node.ignoreLlm).map((node) => node.id); }
+  get ignoredParameters(): Record<string, string[]> {
+    return Object.fromEntries([...this.nodes.values()].map((node) => [node.id, ignoredParameterKeys(node.root)] as const).filter(([, keys]) => keys.length));
+  }
+  private setIgnored(node: NodeView, value: boolean): void {
+    node.ignoreLlm = value; node.root.classList.toggle('llm-ignored', value);
+    node.root.querySelector<HTMLInputElement>('.node-llm-policy input')!.checked = value;
+    node.root.querySelector<HTMLElement>('.node-llm-state')!.textContent = value ? 'KEEP CURRENT' : 'FOLLOW MOOD';
+  }
+  getLayout(): Record<string, NodeLayout> {
+    return Object.fromEntries([...this.nodes].map(([id, node]) => [id, { x: node.x, y: node.y, collapsed: node.root.classList.contains('node-collapsed'), ignoreLlm: node.ignoreLlm, ignoredParameters: ignoredParameterKeys(node.root) }]));
+  }
+  applyLayout(layout: Record<string, NodeLayout>): void {
+    for (const [id, saved] of Object.entries(layout)) {
+      const node = this.nodes.get(id); if (!node) continue;
+      this.place(node, saved.x, saved.y);
+      node.root.classList.toggle('node-collapsed', saved.collapsed);
+      node.root.querySelector('.node-toggle')?.setAttribute('aria-expanded', String(!saved.collapsed));
+      this.setIgnored(node, saved.ignoreLlm ?? false);
+      applyParameterLocks(node.root, saved.ignoredParameters ?? []);
+    }
+    this.redraw();
+  }
   private finish(to: string): void {
     if (!this.pending) return;
     try { const from = this.pending; this.graph.connect(from, to); this.pending = null; this.changed(); this.message(`Connected ${from} → ${to}.`); }

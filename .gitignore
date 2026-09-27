@@ -27,3 +27,6 @@ Thumbs.db
 
 # Generated sound effects (source samples in Samples/ remain trackable)
 server/static/sfx/
+
+# Server-saved experimental setups and uploaded audio
+server/data/

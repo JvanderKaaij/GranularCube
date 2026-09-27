@@ -10,6 +10,8 @@ import { sampleCatalog } from '../sampleCatalog';
 import { effectControls, isSourceEffectParameter, type EffectSnapshot } from '../audio/EffectNode';
 import type { AudioConnection } from '../audio/AudioGraph';
 import { effectRouting, parseEffects, type EffectPlan } from './EffectPlan';
+import { pianoControls, parsePianoGestures, pianoNoteName, type PianoParameters, type PianoBank, type PianoGesture } from '../audio/PianoProgram';
+import { parameterIsIgnored, preserveParameterValues, preservePlanParameters, protectResponseFields } from './ParameterPolicy';
 
 export interface GranularSnapshot {
   id: number;
@@ -30,18 +32,38 @@ export interface PhysicalSnapshot {
   sequence: number[];
 }
 
-export type ModuleSnapshot = GranularSnapshot | PhysicalSnapshot;
+export interface PianoSnapshot {
+  id: number; type: 'piano_sampler'; label: string; playing: boolean;
+  parameters: PianoParameters; bank: PianoBank; gestures: PianoGesture[];
+}
+export type ModuleSnapshot = GranularSnapshot | PhysicalSnapshot | PianoSnapshot;
 
 export interface PatchSnapshot {
   master: MasterParameters;
   modules: ModuleSnapshot[];
   effects?: EffectSnapshot[];
   connections?: AudioConnection[];
+  ignoredNodes?: string[];
+  ignoredParameters?: Record<string, string[]>;
+  readOnly?: { modules: ModuleSnapshot[]; effects: EffectSnapshot[]; master?: MasterParameters };
+}
+
+/** Keep protected nodes as musical/routing context while excluding them from requested edits. */
+export function compositionSnapshot(snapshot: PatchSnapshot): PatchSnapshot {
+  const ignored = new Set(snapshot.ignoredNodes ?? []);
+  const modules = [...snapshot.modules, ...(snapshot.readOnly?.modules ?? [])];
+  const effects = [...(snapshot.effects ?? []), ...(snapshot.readOnly?.effects ?? [])];
+  return { ...snapshot,
+    modules: modules.filter((module) => !ignored.has(`source:${module.id}`)),
+    effects: snapshot.effects === undefined ? undefined : effects.filter((effect) => !ignored.has(effect.id)),
+    readOnly: { modules: modules.filter((module) => ignored.has(`source:${module.id}`)),
+      effects: effects.filter((effect) => ignored.has(effect.id)), master: ignored.has('master') ? snapshot.master : undefined } };
 }
 
 export type ModulePlan =
   | { id: number; type: 'granular'; sample: string; parameters: Parameters }
-  | { id: number; type: 'physical'; parameters: PhysicalParameters; sequence: number[] };
+  | { id: number; type: 'physical'; parameters: PhysicalParameters; sequence: number[] }
+  | { id: number; type: 'piano_sampler'; parameters: PianoParameters; gestures: PianoGesture[] };
 
 export interface PatchPlan {
   master: MasterParameters;
@@ -116,7 +138,7 @@ export function buildParameterContext(snapshot: PatchSnapshot): object {
     moodEffect: parameterMoodDescriptions[`${control.key}Master`] ?? parameterMoodDescriptions[control.key],
   }));
   return {
-    master: modular ? master.filter((control) => control.key === 'gain') : master,
+    master: snapshot.ignoredNodes?.includes('master') ? [] : modular ? master.filter((control) => control.key === 'gain') : master,
     granular: modular ? granular.filter((control) => !isSourceEffectParameter(control.key)) : granular,
     granularDiscrete: modular ? [] : [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }],
     physical: modular ? physicals.filter((control) => !isSourceEffectParameter(control.key)) : physicals,
@@ -124,10 +146,24 @@ export function buildParameterContext(snapshot: PatchSnapshot): object {
       { key: 'model', allowed: ['bell', 'percussion', 'string'], moodEffect: parameterMoodDescriptions.model },
       ...(!modular ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : []),
     ],
-    effects: modular ? effectRouting(snapshot).map((effect) => ({ ...effect, controls: effectControls[effect.type], discrete: effect.type === 'filter' ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : effect.type === 'spectral' ? [{ key: 'freeze', allowed: [false, true], moodEffect: 'Captures and sustains the current spectral frame. Use for a held, evolving tone; release to return to live spectral input.' }] : [] })) : undefined,
+    piano: pianoControls,
+    pianoGestures: snapshot.modules.flatMap((module) => module.type === 'piano_sampler' ? [{
+      id: module.id, availableKeys: module.bank.samples.map((sample) => ({ midi: sample.midi, note: pianoNoteName(sample.midi),
+        canSustain: sample.loopMode === 'loop_continuous' })),
+      bank: { name: module.bank.name, mapping: module.bank.sfz ? 'SFZ key zones with automatic root-pitch transposition' : 'Explicit key mappings',
+        playableKeyCount: module.bank.samples.length, recordingCount: new Set(module.bank.samples.map((sample) => sample.filename)).size,
+        defaultReleaseSeconds: module.bank.defaultReleaseSeconds },
+      currentGestures: module.gestures,
+      format: 'gestures[]: label and notes[]; every note has midi, offsetMs, velocity. Absolute MIDI keys, not root-relative offsets.',
+      limits: { gestures: [1, 8], notesPerGesture: [2, 8], offsetMs: [0, 2000], velocity: [0.05, 1], firstOffsetMs: 0 },
+      timing: 'Offsets are measured from one chord onset, in milliseconds. Choose actual pitches and offsets to express the requested contour. The separate pause controls govern occasional appearances.',
+      availability: module.bank.samples.length >= 2 ? 'Every availableKey is playable. The sampler automatically transposes the mapped recording from its root pitch. Compose the desired sounding MIDI notes; never restrict harmony to recorded root pitches or request sample filenames.' : 'No playable bank yet. Return gestures=[] and preserve silence until samples are supplied.',
+      sustain: 'canSustain keys use the bank loop during hold and release. Other keys decay naturally and may finish sooner than the hold/release settings. Choose register and hold for the intended atmosphere.',
+    }] : []),
+    effects: modular ? effectRouting(snapshot).filter((effect) => !effect.ignoreLlm).map((effect) => ({ ...effect, controls: effectControls[effect.type], discrete: effect.type === 'filter' ? [{ key: 'filterType', allowed: ['lowpass', 'highpass', 'bandpass', 'notch'], moodEffect: parameterMoodDescriptions.filterType }] : effect.type === 'spectral' ? [{ key: 'freeze', allowed: [false, true], moodEffect: 'Captures and sustains the current spectral frame. Use for a held, evolving tone; release to return to live spectral input.' }] : [] })) : undefined,
     connections: snapshot.connections,
     perModuleWindows: snapshot.modules.flatMap((m) => m.type === 'granular' ? [{ id: m.id, currentSample: m.sample, min: 0, max: Math.ceil(m.sampleDurationMs), unit: 'ms', newSample: 'Set selectionStart=selectionEnd=0 until the new sample is decoded' }] : []),
-    interpretation: 'Ranges are inclusive. For every parameter, choose a value inside its range and on its step. Min/max pairs must be ordered.',
+    interpretation: 'Ranges are inclusive. For every parameter, choose a value inside its range and on its step. Min/max pairs must be ordered, including piano gapMinSeconds <= gapMaxSeconds.',
   };
 }
 
@@ -150,17 +186,18 @@ function requireFields(raw: Record<string, unknown>, keys: string[], path: strin
   }
 }
 
-function parseMaster(value: unknown, current: MasterParameters, modular = false): MasterParameters {
+function parseMaster(value: unknown, current: MasterParameters, modular = false, snapshot?: PatchSnapshot): MasterParameters {
   const raw = record(value, 'master');
   requireFields(raw, modular ? ['gain'] : ['reverbMix', 'reverbDecay'], 'master');
   const result = { ...current };
   for (const control of masterControlDefinitions) {
+    if (snapshot && parameterIsIgnored(snapshot, 'master', control.key)) continue;
     result[control.key] = numberInRange(raw[control.key], current[control.key], control.min, control.max, control.step, `master.${control.key}`);
   }
   return result;
 }
 
-function parseGranular(value: unknown, current: GranularSnapshot, selectedSample: string, modular = false): Parameters {
+function parseGranular(value: unknown, current: GranularSnapshot, selectedSample: string, modular = false, snapshot?: PatchSnapshot): Parameters {
   const raw = record(value, `${current.label}.parameters`);
   if (!modular) requireFields(raw, ['reverbMix', 'reverbDecay', 'reverbShimmer'], `${current.label}.parameters`);
   const result = { ...current.parameters };
@@ -171,6 +208,7 @@ function parseGranular(value: unknown, current: GranularSnapshot, selectedSample
         : control.max;
       const keys = control.kind === 'range' ? control.keys : [control.key];
       for (const key of keys) {
+        if (snapshot && parameterIsIgnored(snapshot, `source:${current.id}`, key)) continue;
         result[key] = numberInRange(raw[key], current.parameters[key], control.min, max, control.step, `${current.label}.${key}`);
       }
     }
@@ -179,6 +217,7 @@ function parseGranular(value: unknown, current: GranularSnapshot, selectedSample
     if (!['lowpass', 'highpass', 'bandpass', 'notch'].includes(String(raw.filterType))) throw new Error(`${current.label}.filterType is invalid`);
     result.filterType = raw.filterType as Parameters['filterType'];
   }
+  if (snapshot) Object.assign(result, preserveParameterValues(result, current.parameters, snapshot, `source:${current.id}`));
   for (const [lower, upper] of [
     ['lengthMin', 'lengthMax'], ['ampMin', 'ampMax'], ['selectionStart', 'selectionEnd'],
     ['filterFreqMin', 'filterFreqMax'], ['filterQMin', 'filterQMax'],
@@ -188,7 +227,7 @@ function parseGranular(value: unknown, current: GranularSnapshot, selectedSample
   return result;
 }
 
-function parsePhysical(value: unknown, current: PhysicalSnapshot, modular = false): PhysicalParameters {
+function parsePhysical(value: unknown, current: PhysicalSnapshot, modular = false, snapshot?: PatchSnapshot): PhysicalParameters {
   const raw = record(value, `${current.label}.parameters`);
   requireFields(raw, ['model', ...(!modular ? ['filterType'] : []), ...physicalControlGroups.flatMap((group) => group.controls.map((control) => control.key)).filter((key) => !modular || !isSourceEffectParameter(key))], `${current.label}.parameters`);
   const result = { ...current.parameters };
@@ -200,6 +239,7 @@ function parsePhysical(value: unknown, current: PhysicalSnapshot, modular = fals
   }
   for (const group of physicalControlGroups) {
     for (const control of group.controls) {
+      if (snapshot && parameterIsIgnored(snapshot, `source:${current.id}`, control.key)) continue;
       result[control.key] = numberInRange(raw[control.key], current.parameters[control.key], control.min, control.max, control.step, `${current.label}.${control.key}`);
     }
   }
@@ -218,16 +258,27 @@ export function parsePhysicalSequence(value: unknown, rootNote: number, label: s
   return [...value] as number[];
 }
 
+function parsePianoParameters(value: unknown, current: PianoSnapshot, snapshot: PatchSnapshot): PianoParameters {
+  const raw = record(value, `${current.label}.parameters`);
+  requireFields(raw, pianoControls.map((control) => control.key), current.label);
+  const parameters = { ...current.parameters };
+  for (const c of pianoControls) if (!parameterIsIgnored(snapshot, `source:${current.id}`, c.key)) parameters[c.key] = numberInRange(raw[c.key], parameters[c.key], c.min, c.max, c.step, `${current.label}.${c.key}`);
+  Object.assign(parameters, preserveParameterValues(parameters, current.parameters, snapshot, `source:${current.id}`));
+  if (parameters.gapMinSeconds > parameters.gapMaxSeconds) throw new Error(`${current.label}: shortest pause exceeds longest pause`);
+  return parameters;
+}
+
 export function parsePatchPlan(responseText: string, snapshot: PatchSnapshot): PatchPlan {
   const text = responseText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { throw new Error('API response is not valid JSON'); }
   const root = record(parsed, 'response');
+  protectResponseFields(root, snapshot);
   if (!Array.isArray(root.modules)) throw new Error('response.modules must be an array');
   if (root.modules.length !== snapshot.modules.length) throw new Error('API response must include every current module exactly once');
 
   const modular = snapshot.effects !== undefined;
-  const master = parseMaster(root.master, snapshot.master, modular);
+  const master = snapshot.ignoredNodes?.includes('master') ? { ...snapshot.master } : parseMaster(root.master, snapshot.master, modular, snapshot);
   const byId = new Map<number, Record<string, unknown>>();
   for (const item of root.modules) {
     const module = record(item, 'module');
@@ -242,10 +293,12 @@ export function parsePatchPlan(responseText: string, snapshot: PatchSnapshot): P
         (module.sample !== current.sample && !sampleCatalog.some(({ file }) => file === module.sample))) {
         throw new Error(`${current.label}.sample must be an available sample filename`);
       }
-      return { id: current.id, type: 'granular', sample: module.sample, parameters: parseGranular(module.parameters, current, module.sample, modular) };
+      return { id: current.id, type: 'granular', sample: module.sample, parameters: parseGranular(module.parameters, current, module.sample, modular, snapshot) };
     }
-    const parameters = parsePhysical(module.parameters, current, modular);
-    return { id: current.id, type: 'physical', parameters, sequence: parsePhysicalSequence(module.sequence, parameters.rootNote, current.label) };
+    if (current.type === 'piano_sampler') return { id: current.id, type: current.type,
+      parameters: parsePianoParameters(module.parameters, current, snapshot), gestures: parameterIsIgnored(snapshot, `source:${current.id}`, 'gestures') ? structuredClone(current.gestures) : parsePianoGestures(module.gestures, current.bank.samples.map((sample) => sample.midi), current.label) };
+    const parameters = parsePhysical(module.parameters, current, modular, snapshot);
+    return { id: current.id, type: 'physical', parameters, sequence: parameterIsIgnored(snapshot, `source:${current.id}`, 'sequence') ? [...current.sequence] : parsePhysicalSequence(module.sequence, parameters.rootNote, current.label) };
   });
-  return { master, modules, ...(modular ? { effects: parseEffects(root.effects, snapshot) } : {}) };
+  return preservePlanParameters({ master, modules, ...(modular ? { effects: parseEffects(root.effects, snapshot) } : {}) }, snapshot);
 }

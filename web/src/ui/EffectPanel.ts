@@ -1,11 +1,15 @@
 import { effectControls, type EffectNode, type EffectSnapshot, type EffectValues } from '../audio/EffectNode';
 import { ParameterLfoControl } from './ParameterLfoControl';
 import type { ParameterLfoMap } from '../audio/ParameterLfo';
+import { configureParameterSlider, readSliderValue, writeSliderValue } from './ParameterSlider';
+import { createParameterLock } from './ParameterLock';
 
 export interface EffectPanel {
   root: HTMLElement; inputPort: HTMLElement; outputPort: HTMLElement; engine: EffectNode;
   getSnapshot(): EffectSnapshot; applyParameters(values: EffectValues): void;
   lfos: ParameterLfoMap;
+  applyLfos(settings: ParameterLfoMap): void;
+  applyBypass(bypass: boolean): void;
 }
 export function createEffectPanel(id: string, engine: EffectNode, remove: () => void, edited: () => void): EffectPanel {
   const root = document.createElement('article'); root.className = 'module-card effect-card';
@@ -22,6 +26,7 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
   const lfos: ParameterLfoMap = {};
   const lfoByKey = new Map<string, ParameterLfoControl>();
   if (engine.type === 'spectral') {
+    createParameterLock(root.querySelector<HTMLElement>('.spectral-freeze')!, 'freeze');
     freeze!.checked = Boolean(engine.parameters.freeze);
     freeze!.addEventListener('change', () => { edited(); engine.set('freeze', freeze!.checked); });
     if (spectralStatus) {
@@ -33,8 +38,9 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
     }
   }
   if (engine.type === 'filter') {
-    const label = document.createElement('label'); label.className = 'control';
-    label.innerHTML = `<span class="control-label">MODE</span><select aria-label="${id} filter mode"><option value="lowpass">Low-pass</option><option value="highpass">High-pass</option><option value="bandpass">Band-pass</option><option value="notch">Notch</option></select>`;
+    const label = document.createElement('div'); label.className = 'control';
+    label.innerHTML = `<span class="control-heading"><span class="control-label">MODE</span></span><select aria-label="${id} filter mode"><option value="lowpass">Low-pass</option><option value="highpass">High-pass</option><option value="bandpass">Band-pass</option><option value="notch">Notch</option></select>`;
+    createParameterLock(label.querySelector<HTMLElement>('.control-heading')!, 'filterType');
     const select = label.querySelector('select')!;
     select.addEventListener('change', () => { edited(); engine.set('filterType', select.value); });
     inputs.set('filterType', select); controls.append(label);
@@ -43,9 +49,10 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
     const label = document.createElement('div'); label.className = 'control'; label.title = control.moodEffect;
     label.innerHTML = `<span class="control-heading"><span class="control-label">${control.label}</span><output></output></span><input type="range" min="${control.min}" max="${control.max}" step="${control.step}" aria-label="${id} ${control.label}" />`;
     const input = label.querySelector('input')!; const output = label.querySelector('output')!;
+    configureParameterSlider(input, control, Number(engine.parameters[control.key]));
     lfoByKey.set(control.key, new ParameterLfoControl(label.querySelector<HTMLElement>('.control-heading')!, control.key, input, (settings) => { lfos[control.key] = settings; engine.setParameterLfos(lfos); }, (value) => `${Number(value.toFixed(2))}${control.unit ? ` ${control.unit}` : ''}`));
     inputs.set(control.key, input); outputs.set(control.key, output);
-    input.addEventListener('input', () => { edited(); engine.set(control.key, Number(input.value)); render(); });
+    input.addEventListener('input', () => { edited(); engine.set(control.key, readSliderValue(input)); render(); });
     controls.append(label);
   }
   const bypass = root.querySelector<HTMLInputElement>('.effect-bypass input')!;
@@ -53,7 +60,8 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
   function render(): void {
     if (freeze) freeze.checked = Boolean(engine.parameters.freeze);
     for (const [key, input] of inputs) {
-      const value = engine.parameters[key]; input.value = String(value);
+      const value = engine.parameters[key];
+      if (input instanceof HTMLInputElement) writeSliderValue(input, Number(value)); else input.value = String(value);
       lfoByKey.get(key)?.setBase(Number(value));
       const output = outputs.get(key);
       if (output) output.value = `${Number(Number(value).toFixed(2))} ${effectControls[engine.type].find((c) => c.key === key)?.unit ?? ''}`.trim();
@@ -61,6 +69,8 @@ export function createEffectPanel(id: string, engine: EffectNode, remove: () => 
   }
   render();
   return { root, inputPort: root.querySelector('.input-port')!, outputPort: root.querySelector('.output-port')!, engine, lfos,
+    applyLfos(settings) { for (const [key, settingsForKey] of Object.entries(settings)) lfoByKey.get(key)?.applySettings(settingsForKey); },
+    applyBypass(value) { bypass.checked = value; engine.setBypass(value); root.classList.toggle('bypassed', value); },
     getSnapshot: () => ({ id, type: engine.type, parameters: engine.parameters, bypass: engine.bypass }),
     applyParameters(values) { engine.apply(values); render(); },
   };

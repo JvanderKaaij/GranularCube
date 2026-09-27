@@ -1,4 +1,6 @@
 import { defaultParameterLfo, parameterLfoValue, type ParameterLfoSettings } from '../audio/ParameterLfo';
+import { readSliderValue, writeSliderValue, sliderBounds } from './ParameterSlider';
+import { createParameterLock } from './ParameterLock';
 
 const controls = new Set<ParameterLfoControl>();
 let openControl: ParameterLfoControl | null = null;
@@ -14,6 +16,7 @@ export class ParameterLfoControl {
   private readonly live: HTMLOutputElement;
   private readonly root: HTMLElement;
   private base = 0;
+  private renderSettings: (() => void) | null = null;
   get isConnected(): boolean { return this.button.isConnected; }
 
   constructor(
@@ -29,7 +32,7 @@ export class ParameterLfoControl {
     controls.add(this);
     host.classList.add('parameter-lfo-host');
     host.dataset.lfoParam = key;
-    this.base = Number(input.value);
+    this.base = readSliderValue(input);
     const root = document.createElement('span'); root.className = 'parameter-lfo'; this.root = root;
     this.button = document.createElement('button'); this.button.type = 'button'; this.button.className = 'parameter-lfo-button';
     this.button.textContent = '∿'; this.button.title = `${key}: configure its LFO`; this.button.setAttribute('aria-label', `${key}: configure LFO`); this.button.setAttribute('aria-expanded', 'false');
@@ -54,6 +57,7 @@ export class ParameterLfoControl {
       root.classList.toggle('enabled', this.settings.enabled);
       this.onChange({ ...this.settings }); this.updateLive(performance.now() / 1000);
     };
+    this.renderSettings = render;
     for (const control of [enabled.querySelector('input')!, periodInput, depthInput, waveform]) control.addEventListener('input', render);
     this.button.addEventListener('click', (event) => {
       event.preventDefault(); event.stopPropagation();
@@ -62,15 +66,18 @@ export class ParameterLfoControl {
       const card = this.root.closest('.module-card, .master-node'); card?.classList.toggle('lfo-open', !this.panel.hidden);
       openControl = this.panel.hidden ? null : this;
     });
-    root.append(this.button, this.panel); host.append(root); render();
-    input.addEventListener('input', () => { if (input.dataset.lfoManaged !== 'true') this.base = Number(input.value); });
+    root.append(this.button);
+    createParameterLock(root, key.replace(/^master-/, ''));
+    root.append(this.panel); host.append(root); render();
+    input.addEventListener('input', () => { if (input.dataset.lfoManaged !== 'true') this.base = readSliderValue(input); });
   }
 
   updateLive(timeSeconds: number): void {
+    const { min, max } = sliderBounds(this.input);
     const value = this.settings.enabled
-      ? parameterLfoValue(this.base, this.key, this.settings, timeSeconds, Number(this.input.min), Number(this.input.max))
+      ? parameterLfoValue(this.base, this.key, this.settings, timeSeconds, min, max)
       : this.base;
-    if (!this.input.dataset.lfoManaged) this.input.value = String(value);
+    if (!this.input.dataset.lfoManaged) writeSliderValue(this.input, value);
     this.onLiveValue?.(value);
     const output = this.input.closest('.control')?.querySelector<HTMLOutputElement>('.control-heading > output')
       ?? this.input.closest('.master-control')?.querySelector<HTMLOutputElement>('.master-control-head > output');
@@ -79,6 +86,14 @@ export class ParameterLfoControl {
   }
 
   setBase(value: number): void { this.base = value; this.updateLive(performance.now() / 1000); }
+  applySettings(settings: ParameterLfoSettings): void {
+    Object.assign(this.settings, settings, { enabled: this.alwaysEnabled || settings.enabled });
+    const ranges = this.panel.querySelectorAll<HTMLInputElement>('input[type="range"]');
+    ranges[0].value = String(settings.periodSeconds); ranges[1].value = String(settings.depth);
+    this.panel.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked = this.settings.enabled;
+    this.panel.querySelector<HTMLSelectElement>('select')!.value = settings.waveform;
+    this.renderSettings?.();
+  }
 
   close(): void {
     this.panel.hidden = true; this.button.setAttribute('aria-expanded', 'false');

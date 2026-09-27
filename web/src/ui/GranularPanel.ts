@@ -5,6 +5,7 @@ import { sampleCatalog } from '../sampleCatalog';
 import { requestAvailableSamples, requestSoundEffect, SFX_URL } from '../ai/SfxClient';
 import { createRangeControl, type RangeControl } from './RangeControl';
 import { ParameterLfoControl } from './ParameterLfoControl';
+import { createParameterLock } from './ParameterLock';
 import type { ParameterLfoMap } from '../audio/ParameterLfo';
 
 function formatValue(value: number, unit = ''): string {
@@ -24,6 +25,8 @@ export interface GranularPanel {
   preparePatchSample(sample: string, generated?: { keyword: string; audioUrl: string }, signal?: AbortSignal): Promise<PreparedPanelSample>;
   applyParameters(parameters: Parameters): void;
   lfos: ParameterLfoMap;
+  applyLfos(settings: ParameterLfoMap): void;
+  getSampleReference(): { name: string; builtin: boolean };
   start(): Promise<void>;
   stop(): void;
 }
@@ -41,6 +44,7 @@ export function createGranularPanel(
   onRemove: (id: number) => void,
   onStateChange: () => void,
   onManualSampleRequest: () => void,
+  initialSample?: { name: string; buffer: AudioBuffer; builtin: boolean },
 ): GranularPanel {
   const label = `GRAIN ${String(id).padStart(2, '0')}`;
   const root = document.createElement('article');
@@ -71,6 +75,7 @@ export function createGranularPanel(
   const sampleSelect = root.querySelector<HTMLSelectElement>('.sample-select')!;
   const sampleName = root.querySelector<HTMLElement>('.sample-name')!;
   const sampleDuration = root.querySelector<HTMLElement>('.sample-duration')!;
+  createParameterLock(root.querySelector<HTMLElement>('.sample-readout')!, 'sample');
   const fileInput = root.querySelector<HTMLInputElement>('.file-input')!;
   const sfxForm = root.querySelector<HTMLFormElement>('.sfx-generator')!;
   const sfxWord = root.querySelector<HTMLInputElement>('.sfx-word')!;
@@ -79,6 +84,7 @@ export function createGranularPanel(
   const controls = root.querySelector<HTMLElement>('.module-controls')!;
   let loadToken = 0;
   let currentSample = '';
+  let currentBuiltin = false;
   let availableBuiltIns = new Set<string>();
   let customOption: HTMLOptionElement | null = null;
   let selectionRange: RangeControl | null = null;
@@ -123,13 +129,14 @@ export function createGranularPanel(
     sampleDuration.textContent = `${(durationMs / 1000).toFixed(1)} s`;
   }
 
-  async function loadSample(name: string, loader: () => Promise<number>): Promise<boolean> {
+  async function loadSample(name: string, loader: () => Promise<number>, builtin = false): Promise<boolean> {
     const token = ++loadToken;
     setStatus(`Loading ${name}…`);
     try {
       const durationMs = await loader();
       if (token !== loadToken) return false;
       currentSample = name;
+      currentBuiltin = builtin;
       sampleName.textContent = name;
       showSampleSelection(name);
       updateSelection(durationMs);
@@ -171,7 +178,7 @@ export function createGranularPanel(
         };
         for (const [index, key] of definition.keys.entries()) {
           const input = index === 0 ? lowerInput : upperInput;
-          input.dataset.param = key; input.min = String(definition.min); input.max = String(definition.max);
+          input.dataset.param = key;
           input.dataset.lfoManaged = 'true';
           lfoControls.push(new ParameterLfoControl(range.root.querySelector<HTMLElement>('.range-heading')!, key, input, (settings) => { lfos[key] = settings; syncLfos(); }, (value) => formatValue(value, definition.unit), (value) => {
             liveRangeValues[key] = value;
@@ -226,7 +233,7 @@ export function createGranularPanel(
   sampleSelect.addEventListener('change', () => {
     onManualSampleRequest();
     const file = sampleSelect.value;
-    void loadSample(file, () => engine.loadSample(`/${encodeURIComponent(file)}`));
+    void loadSample(file, () => engine.loadSample(`/${encodeURIComponent(file)}`), true);
   });
   fileInput.addEventListener('change', () => {
     const file = fileInput.files?.[0];
@@ -283,22 +290,31 @@ export function createGranularPanel(
     }
   });
 
+  if (initialSample) {
+    currentSample = initialSample.name; currentBuiltin = initialSample.builtin;
+    engine.commitSample(initialSample.buffer, 0.1);
+    sampleName.textContent = currentSample; updateSelection(engine.sampleDurationMs);
+    playButton.disabled = false; updatePlayState(); setStatus('Ready');
+  }
   async function initializeSamples(): Promise<void> {
     try {
       const available = new Set(await requestAvailableSamples());
       const options = sampleCatalog.filter(({ file }) => available.has(file));
       if (!options.length) throw new Error('No catalog samples are present in the server Samples folder.');
       availableBuiltIns = new Set(options.map(({ file }) => file));
+      customOption = null;
       sampleSelect.replaceChildren(...options.map(({ file, label: name }) => {
         const option = document.createElement('option'); option.value = file; option.textContent = name; return option;
       }));
-      const initialSample = options[(id - 1) % options.length].file;
-      sampleSelect.value = initialSample;
       sampleSelect.disabled = false;
-      await loadSample(initialSample, () => engine.loadSample(`/${encodeURIComponent(initialSample)}`));
+      if (currentSample) { showSampleSelection(currentSample); return; }
+      const filename = options[(id - 1) % options.length].file;
+      sampleSelect.value = filename;
+      await loadSample(filename, () => engine.loadSample(`/${encodeURIComponent(filename)}`), true);
     } catch (error) {
       sampleSelect.replaceChildren(new Option('No verified built-in samples', ''));
       sampleSelect.disabled = true;
+      if (currentSample) { customOption = null; showSampleSelection(currentSample); return; }
       playButton.disabled = true;
       setStatus(error instanceof Error ? error.message : 'Could not verify the server sample files.', true);
     }
@@ -312,6 +328,8 @@ export function createGranularPanel(
     label,
     engine,
     lfos,
+    applyLfos(settings) { for (const [key, settingsForKey] of Object.entries(settings)) lfoByKey.get(key)?.applySettings(settingsForKey); },
+    getSampleReference: () => ({ name: currentSample, builtin: currentBuiltin }),
     getSnapshot() {
       return {
         id,
@@ -326,7 +344,7 @@ export function createGranularPanel(
     async applySample(sample, blendSeconds) {
       if (sample === currentSample && engine.sampleDurationMs > 0) return false;
       if (!availableBuiltIns.has(sample)) throw new Error(`${label}: sample is not present in the server Samples folder`);
-      const loaded = await loadSample(sample, () => engine.loadSample(`/${encodeURIComponent(sample)}`, blendSeconds));
+      const loaded = await loadSample(sample, () => engine.loadSample(`/${encodeURIComponent(sample)}`, blendSeconds), true);
       if (!loaded) throw new Error(`${label}: could not load ${sample}`);
       return true;
     },
@@ -355,6 +373,7 @@ export function createGranularPanel(
           ++loadToken;
           const durationMs = engine.commitSample(decoded, blendSeconds);
           currentSample = generated ? `AI · ${generated.keyword}` : sample;
+          currentBuiltin = !generated && availableBuiltIns.has(sample);
           sampleName.textContent = currentSample;
           showSampleSelection(currentSample);
           updateSelection(durationMs);
@@ -373,14 +392,15 @@ export function createGranularPanel(
           if (definition.kind === 'range') {
             const range = rangeControls.get(definition.keys[0])!;
             range.setValues(parameters[definition.keys[0]], parameters[definition.keys[1]]);
-            const [lower, upper] = range.getValues();
-          engine.setParameter(definition.keys[0], lower);
-          engine.setParameter(definition.keys[1], upper);
-          lfoByKey.get(definition.keys[0])?.setBase(lower); lfoByKey.get(definition.keys[1])?.setBase(upper);
+            // UI step rounding must not change an authored/protected base value.
+            const lower = parameters[definition.keys[0]], upper = parameters[definition.keys[1]];
+            engine.setParameter(definition.keys[0], lower);
+            engine.setParameter(definition.keys[1], upper);
+            lfoByKey.get(definition.keys[0])?.setBase(lower); lfoByKey.get(definition.keys[1])?.setBase(upper);
           } else {
             const input = controls.querySelector<HTMLInputElement>(`[data-param="${definition.key}"]`)!;
             input.value = String(parameters[definition.key]);
-            const value = Number(input.value);
+            const value = parameters[definition.key];
             engine.setParameter(definition.key, value);
             lfoByKey.get(definition.key)?.setBase(value);
             input.closest('.control')!.querySelector<HTMLOutputElement>('output')!.value = formatValue(value, definition.unit);

@@ -58,6 +58,7 @@ export class PhysicalEngine {
   get isPlaying(): boolean { return this.playing; }
   get currentParameters(): PhysicalParameters { return { ...this.parameters }; }
   get currentSequence(): number[] { return [...this.sequence]; }
+  get currentMovement(): Movement | null { return this.motion.currentSettings; }
   setMovement(movement: Movement | null): void { this.motion.set(movement, this.context.currentTime); }
   setMotionEnabled(enabled: boolean): void { this.motion.enabled = enabled; }
   setParameterLfos(settings: ParameterLfoMap): void { this.motion.setParameterLfos(settings); }

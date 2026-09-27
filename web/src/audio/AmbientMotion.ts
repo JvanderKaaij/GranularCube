@@ -13,6 +13,7 @@ export class AmbientMotion {
   enabled = true;
   private lfos: ParameterLfoMap = {};
   constructor(private readonly seed: number) {}
+  get currentSettings(): Movement | null { return this.config ? { ...this.config } : null; }
   set(config: Movement | null, time: number): void { this.config = config; this.start = time; }
   setParameterLfos(settings: ParameterLfoMap): void { this.lfos = structuredClone(settings); }
   private wave(time: number, lane: number): number {

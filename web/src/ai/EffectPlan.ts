@@ -1,5 +1,6 @@
 import { effectControls, type EffectKind, type EffectValues } from '../audio/EffectNode';
 import type { PatchSnapshot } from './PatchPlan';
+import { parameterIsIgnored } from './ParameterPolicy';
 
 export interface EffectPlan { id: string; type: EffectKind; parameters: EffectValues }
 
@@ -12,17 +13,20 @@ export function effectRouting(snapshot: PatchSnapshot) {
     seen.add(from);
     return edges.some((edge) => edge.from === from && reachable(edge.to, to, seen));
   }
-  return (snapshot.effects ?? []).map((effect) => ({
-    ...effect, reachesMaster: reachable(effect.id, 'master'),
-    sourceIds: snapshot.modules.filter((source) => reachable(`source:${source.id}`, effect.id)).map((source) => source.id),
+  return [...(snapshot.effects ?? []), ...(snapshot.readOnly?.effects ?? [])].map((effect) => ({
+    ...effect, ignoreLlm: snapshot.ignoredNodes?.includes(effect.id) ?? false, reachesMaster: reachable(effect.id, 'master'),
+    sourceIds: [...snapshot.modules, ...(snapshot.readOnly?.modules ?? [])].filter((source) => reachable(`source:${source.id}`, effect.id)).map((source) => source.id),
   }));
 }
 
 export function parseEffects(value: unknown, snapshot: PatchSnapshot): EffectPlan[] | undefined {
   if (snapshot.effects === undefined) return undefined;
-  if (!Array.isArray(value) || value.length !== snapshot.effects.length) throw new Error('Parameter response effects must include every current effect exactly once');
+  if (!Array.isArray(value)) throw new Error('Parameter response effects must be an array');
+  // Discard protected effect entries echoed by older saved prompts.
+  const editable = value.filter((effect) => !effect || typeof effect.id !== 'string' || !snapshot.ignoredNodes?.includes(effect.id));
+  if (editable.length !== snapshot.effects.length) throw new Error('Parameter response effects must include every editable effect exactly once');
   const seen = new Set<string>();
-  return value.map((raw) => {
+  return editable.map((raw) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Effect must be an object');
     const current = snapshot.effects!.find((effect) => effect.id === raw.id);
     if (!current || seen.has(raw.id) || current.type !== raw.type) throw new Error('Unknown, duplicate or mismatched effect');
@@ -30,17 +34,20 @@ export function parseEffects(value: unknown, snapshot: PatchSnapshot): EffectPla
     if (!raw.parameters || typeof raw.parameters !== 'object' || Array.isArray(raw.parameters)) throw new Error(`${raw.id}.parameters must be an object`);
     const parameters: EffectValues = {};
     for (const control of effectControls[current.type]) {
+      if (parameterIsIgnored(snapshot, current.id, control.key)) { parameters[control.key] = current.parameters[control.key]; continue; }
       const number = raw.parameters[control.key];
       if (typeof number !== 'number' || !Number.isFinite(number) || number < control.min || number > control.max) throw new Error(`${raw.id}.${control.key} must be between ${control.min} and ${control.max}`);
       parameters[control.key] = Number(Math.min(control.max, control.min + Math.round((number - control.min) / control.step) * control.step).toFixed(4));
     }
     if (current.type === 'filter') {
-      if (!['lowpass', 'highpass', 'bandpass', 'notch'].includes(raw.parameters.filterType)) throw new Error(`${raw.id}.filterType must be lowpass, highpass, bandpass or notch`);
-      parameters.filterType = raw.parameters.filterType;
+      const value = parameterIsIgnored(snapshot, current.id, 'filterType') ? current.parameters.filterType : raw.parameters.filterType;
+      if (!['lowpass', 'highpass', 'bandpass', 'notch'].includes(value)) throw new Error(`${raw.id}.filterType must be lowpass, highpass, bandpass or notch`);
+      parameters.filterType = value;
     }
     if (current.type === 'spectral') {
-      if (typeof raw.parameters.freeze !== 'boolean') throw new Error(`${current.id}.freeze must be true or false`);
-      parameters.freeze = raw.parameters.freeze;
+      const value = parameterIsIgnored(snapshot, current.id, 'freeze') ? current.parameters.freeze : raw.parameters.freeze;
+      if (typeof value !== 'boolean') throw new Error(`${current.id}.freeze must be true or false`);
+      parameters.freeze = value;
     }
     return { id: current.id, type: current.type, parameters };
   });
@@ -62,6 +69,7 @@ export function fitMelodicEffects(plans: EffectPlan[], snapshot: PatchSnapshot, 
     }
     if (!delay) continue;
     for (const [key, min, max] of [['mix', 0.55, 0.8], ['time', 0.5, 1.2], ['feedback', 0.58, 0.78]] as const) {
+      if (parameterIsIgnored(snapshot, delay.id, key)) continue;
       const before = Number(delay.parameters[key]);
       delay.parameters[key] = Math.max(min, Math.min(max, before));
       if (before !== delay.parameters[key]) corrections.push(`${delay.id}.${key}: ${before} → ${delay.parameters[key]} (melodic atmosphere)`);

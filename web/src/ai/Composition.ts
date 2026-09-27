@@ -8,6 +8,8 @@ import { freshPhysicalSequence } from './PhysicalSequence';
 import { briefOutputSchema, parameterOutputSchema } from './CompositionSchema';
 import { isSourceEffectParameter } from '../audio/EffectNode';
 import { effectRouting, fitMelodicEffects, parseEffects } from './EffectPlan';
+import { pianoDefaults, pianoControls, parsePianoGestures } from '../audio/PianoProgram';
+import { parameterIsIgnored, sampleIsFixed, lockedParameterContext, preserveParameterValues, preservePlanParameters, protectResponseFields } from './ParameterPolicy';
 
 export type Role = 'bed' | 'texture' | 'focal' | 'accent';
 export interface ImageSound {
@@ -35,7 +37,7 @@ export interface Composition {
   plan: PatchPlan; debug: CompositionDebug; keywords: Map<number, string>; movement: Movement;
 }
 export interface ApplicationOptions { signal?: AbortSignal; movement?: Movement; onPhase?: (phase: 'decode' | 'transition') => void }
-export interface ApplicationReport { decodeMs: number; transitionMs: number; samples: { id: number; durationMs: number; changed: boolean }[] }
+export interface ApplicationReport { decodeMs: number; transitionMs: number; samples: { id: number; durationMs: number; changed: boolean }[]; piano?: { id: number; gestureCount: number; keys: number[] }[] }
 const roleCaps: Record<Role, number> = { bed: 0.75, texture: 0.7, focal: 0.9, accent: 0.6 };
 const axes = ['tension', 'warmth', 'movement', 'density', 'space', 'brightness'] as const;
 export const SFX_PROMPT_TEMPLATE = 'Isolated sound of {source} {action}; {character}.';
@@ -71,15 +73,22 @@ export const BRIEF_SYSTEM = `You are composing a quiet, evolving ambient soundsc
 For an image, derive the mood from observable color, light, space, composition, depicted material, and implied movement. Explain a few concrete sonic correspondences. Make a best guess at the artistic era, qualified with likely/approximate; never assert unsupported artist identities or dates. Do not copy a previous mood or use era as an automatic period-music stereotype.
 Arrange the instruments ACTUALLY present. Assign complementary bed, texture, focal, or accent roles, with relative level weight 0.1–1. Usually use one focal voice at most; all voices should not be equally busy. Avoid filling every role when there are too few modules.
 For each built-in granular voice, rank up to 4 exact filenames from the supplied availableSampleFilenames, when possible. One choice is enough; the app fills out a short ranking from available role-tagged files. Use the tags to explain the choice. Prefer relevant alternatives to the last few paintings, but do not change a sample just for novelty: give reuseReason when a recent file is musically essential. A ranked alternative must fit the same role. Never invent filenames.
-For EVERY image with granular instruments, return one mandatory imageSound with the fields specified in outputSchema. This creates one new eight-second sound sample for this artwork. Pick a current granular module ID; the app assigns this generated sound to that voice. The other granular voices use catalog samples. Do not omit imageSound, do not use an omission reason, and do not leave its strings empty. Inspect the artwork first and identify the visible detail supporting your source choice. That evidence must come from this image; sample filenames, catalog tags, enum choices, current settings and schema field descriptions are not evidence of what the artwork depicts. Select the strongest supported physical sound-producing source, then specify a plausible audible action. Do not assume a recurring default source. For a still scene, infer an action only from a depicted object's material, mechanism, or setting and set basis=implied honestly. For a directly depicted sound-producing event use basis=depicted. For wholly abstract art, choose a concrete real sound as a material interpretation of the observed texture or movement, set basis=material_analogy, and explain that correspondence in evidence. This is an explicit interpretation, not a claim that the painting literally depicts the source.
+For EVERY image with a granular instrument eligible for new samples under editPolicy, return one mandatory imageSound with the fields specified in outputSchema. This creates one new eight-second sound sample for this artwork. Pick an eligible granular module ID from outputSchema; the app assigns this generated sound to that voice. A sample/window lock preserves its recording. If all granular sources are fixed or ignored, omit imageSound and retain their existing sources. The other granular voices use catalog samples. Do not omit imageSound, do not use an omission reason, and do not leave its strings empty. Inspect the artwork first and identify the visible detail supporting your source choice. That evidence must come from this image; sample filenames, catalog tags, enum choices, current settings and schema field descriptions are not evidence of what the artwork depicts. Select the strongest supported physical sound-producing source, then specify a plausible audible action. Do not assume a recurring default source. For a still scene, infer an action only from a depicted object's material, mechanism, or setting and set basis=implied honestly. For a directly depicted sound-producing event use basis=depicted. For wholly abstract art, choose a concrete real sound as a material interpretation of the observed texture or movement, set basis=material_analogy, and explain that correspondence in evidence. This is an explicit interpretation, not a claim that the painting literally depicts the source.
 Keep imageSound.source/action/character short and literal: one physical source, one action, and a few audible details about texture, distance, pace and intensity. Choose the source from the painting, then adapt the intensity, pace and recording character to suit an atmospheric composition while retaining its audible identity. Never request emotions, colors, light, time, memories, an era, or musical metaphors as sounds. The painting's support medium is not an automatic sound source. Do not copy schema instructions or field names into content. The sound should remain recognizable with long granular fragments. Do not ask for music, a synth pad or multiple unrelated sources. The mood shapes the synths separately. For text-only requests or physical-only patches omit imageSound. Physical instruments choose bell, percussion or string and a role.
+Piano_sampler voices use recorded piano samples mapped across playable keys, including SFZ zones with automatic transposition. Assign them a harmonic role suited to occasional contemplative chord gestures. They need no granular source, overlap, SFX request or physical model. Consider tonal ambiguity, register, and how a sparse chord can answer the other voices. A piano with no available keys stays silent until recordings are supplied.
 Set target overlap for each granular module: expected simultaneous grains = density × mean grain duration in seconds. Values below 1 leave gaps; 1–3 are flowing; 3–8 are dense beds. Focal recognizable effects need longer grains and moderate overlap so their identity survives. Do not make all voices dense. Evolution amount is 0–1 and periodSeconds 20–180; derive restrained movement from the scene, with zero allowed for stillness.`;
 
 export function briefPrompt(snapshot: PatchSnapshot, direction: string, image: boolean, recentSamples: string[], availableSamples: string[] = sampleCatalog.map((sample) => sample.file), sfxTemplate = SFX_PROMPT_TEMPLATE): string {
-  const needsSound = image && snapshot.modules.some((module) => module.type === 'granular');
+  const needsSound = image && snapshot.modules.some((module) => module.type === 'granular' && !sampleIsFixed(snapshot, module.id));
   return JSON.stringify({ task: image ? 'Interpret this painting into a musical brief' : 'Translate the requested mood into a musical brief',
     direction: image ? 'Use the painting itself; previous mood text is not evidence.' : direction,
     modules: snapshot.modules.map((m) => ({ id: m.id, type: m.type })),
+    editPolicy: { editableModuleIds: snapshot.modules.map((module) => module.id), ignoredNodes: snapshot.ignoredNodes ?? [],
+      readOnlyNodes: snapshot.readOnly, lockedParameters: lockedParameterContext(snapshot),
+      fixedSampleModuleIds: snapshot.modules.filter((module) => module.type === 'granular' && sampleIsFixed(snapshot, module.id)).map((module) => module.id),
+      instruction: 'Return module roles only for editableModuleIds. readOnlyNodes are fixed musical context: consider their current sound and harmony, but do not assign new settings, notes, samples or SFX to them. Individually lockedParameters retain their current values; compose the remaining controls around them. Preserve locked physical models. fixedSampleModuleIds keep their recording and cannot receive SFX or new catalog choices; assign a role and overlap suited to their existing source. Request imageSound only when outputSchema includes it, using an eligible ID from its enum. The outputSchema takes precedence over older saved instructions to include all nodes or always generate SFX.' },
+    pianoVoices: snapshot.modules.flatMap((module) => module.type === 'piano_sampler' ? [{ id: module.id, availableKeyCount: module.bank.samples.length,
+      instruction: 'Assign an occasional harmonic role; piano uses no granular source, overlap or physical model. Chord notes and timing are composed in the next stage.' }] : []),
     routing: snapshot.effects === undefined ? undefined : { effects: effectRouting(snapshot), connections: snapshot.connections, instruction: 'Arrange source roles for the connected effects. Routing and bypass are chosen by the user; disconnected sources remain silent.' },
     recentSamples, catalog: taggedSampleCatalog.filter((sample) => availableSamples.includes(sample.file)),
     availableSampleFilenames: availableSamples,
@@ -100,8 +109,11 @@ export function parseBrief(text: string, snapshot: PatchSnapshot, image: boolean
   const root = jsonObject(text);
   const values = object(root.axes, 'axes');
   const evolution = object(root.evolution, 'evolution');
+  // Older prompt overrides may still echo protected IDs; discard those roles before validation.
+  if (Array.isArray(root.modules)) root.modules = root.modules.filter((module) =>
+    !module || typeof module.id !== 'number' || !snapshot.ignoredNodes?.includes(`source:${module.id}`));
   if (!Array.isArray(root.modules) || root.modules.length !== snapshot.modules.length) throw new Error('Brief must cover exactly the current modules');
-  const granularIds = snapshot.modules.filter((module) => module.type === 'granular').map((module) => module.id);
+  const granularIds = snapshot.modules.filter((module) => module.type === 'granular' && !sampleIsFixed(snapshot, module.id)).map((module) => module.id);
   let imageSound: ImageSound | undefined;
   if (image && granularIds.length) {
     const legacy = root.modules.find((value) => value && typeof value === 'object' && 'sound' in value) as Record<string, unknown> | undefined;
@@ -130,12 +142,16 @@ export function parseBrief(text: string, snapshot: PatchSnapshot, image: boolean
     if (!['bed', 'texture', 'focal', 'accent'].includes(String(raw.role))) throw new Error('Unknown musical role');
     const result: BriefModule = { id: current.id, role: raw.role as Role, weight: bounded(raw.weight, 'weight', 0.1, 1), reason: shortText(raw.reason, 'role reason') };
     if (current.type === 'physical') {
-      if (!['bell', 'percussion', 'string'].includes(String(raw.model))) throw new Error('Brief needs a physical model');
-      result.model = raw.model as PhysicalModel;
-    } else {
+      const model = parameterIsIgnored(snapshot, `source:${current.id}`, 'model') ? current.parameters.model : raw.model;
+      if (!['bell', 'percussion', 'string'].includes(String(model))) throw new Error('Brief needs a physical model');
+      result.model = model as PhysicalModel;
+    } else if (current.type === 'granular') {
       result.source = imageSound?.moduleId === current.id ? 'sfx' : 'built_in';
       result.overlap = bounded(raw.overlap, 'overlap', 0.05, 8);
-      if (result.source === 'sfx') {
+      if (sampleIsFixed(snapshot, current.id)) {
+        result.source = 'built_in'; result.sampleCandidates = [current.sample]; result.reuseReason = 'Sample/window protected by the user';
+      }
+      else if (result.source === 'sfx') {
         result.sound = imageSound!;
         if (result.role !== 'focal') result.role = 'texture';
         result.weight = Math.max(0.65, result.weight);
@@ -188,7 +204,8 @@ export function chooseSources(brief: MusicalBrief, snapshot: PatchSnapshot, rece
   });
 }
 
-export const PARAMETER_SYSTEM = `You translate a validated musical brief into meaningful, playable synthesizer parameters. Return exactly one JSON object conforming to outputSchema, with top-level keys "master" (an object), "modules" (an array), and "effects" (an array when supplied in the schema). The schema defines types, required fields and ranges; return composed values, not the schema or its metadata. The modules array must contain exactly one object for every supplied source ID, with that ID and its matching type. The effects array must contain exactly one object for every existing effect ID, including disconnected or bypassed nodes. Do not return maps, a summary, prose, or Markdown. No new nodes. Follow the supplied per-control ranges and steps. Numeric controls are JSON numbers; filterType and physical model are enum strings. Do not treat current values as recommendations.
+export const PARAMETER_SYSTEM = `You translate a validated musical brief into meaningful, playable synthesizer parameters. Return exactly one JSON object conforming to outputSchema, with top-level keys "master" (an object), "modules" (an array), and "effects" (an array when supplied in the schema). The schema defines types, required fields and ranges; return composed values, not the schema or its metadata. The modules array must contain exactly one object for every supplied source ID, with that ID and its matching type. The effects array must contain exactly one object for every existing effect ID, including disconnected or bypassed nodes. Do not return maps, a summary, prose, or Markdown. No new nodes. Follow the supplied per-control ranges and steps. Numeric controls are JSON numbers; filterType and physical model are enum strings. Do not treat current values as recommendations. Individually lockedParameters are mandatory fixed base values: copy them exactly, compose the remaining controls around them, and preserve a locked sequence or piano gestures. Locks take precedence over all atmospheric defaults, gain budgets and motif-freshness instructions below; existing LFOs continue.
+The request's editPolicy lists the editable module/effect IDs. Return entries only for those IDs, including an empty array when none are editable. readOnlyNodes are protected musical context: preserve their synthesis parameters, sample, physical model, note sequence, piano gestures and evolution. Account for their existing register, harmony, levels and role when composing the editable voices or shared effects. Never return edits or generated samples for protected nodes. When masterIgnored=true, return master={} and retain the current master. These current exclusions and outputSchema take precedence over older saved instructions about including every node.
 Translate the brief axes into audible relationships, not six identical slider positions. Warmth tends toward rounder attacks and less high-frequency energy; brightness governs filter passband and modal upper partials; movement governs event rates and local variation, not loudness; density governs overlap and the division of roles; space governs wetness and tail duration while a focal voice remains intelligible. Tension can come from resonant color, physical beating/inharmonicity, or note contour, with restrained levels. Interpret the axes together and use the visible evidence and role to decide which mappings actually apply. Create two or three deliberate contrasts between voices instead of assigning the same filter, rate and reverb to everything.
 Work from each voice's role and sonic evidence. Keep every source clearly audible in the mix: a bed sustains the scene, a texture supports it, a focal source carries identity, and an accent leaves room. As a starting point, use module output gain around 0.45–0.75 for beds and textures, 0.55–0.85 for focal voices, and 0.35–0.65 for accents, within the supplied range. Raise a quiet source's module gain before making its other parameters extreme; preserve role contrast and reduce level only when overlap or combined sources make the mix crowded. Coordinate grain length and targetOverlap rather than independently guessing density. Density is derived locally from targetOverlap / mean grain length in seconds. Requested overlap is 0.05–8. Use differences in grain duration, envelope range, filter bandwidth and wetness to separate roles.
 Filter descriptions depend on mode: lowpass removes brightness, highpass removes body, bandpass isolates a band, notch cuts one. Q is resonance, not volume. Amp range is per grain; overlapping grains add energy, so keep overlap intentional, but do not default every module to a quiet level. Wetness and decay affect distance and persistence; do not give every voice maximum wetness, shimmer, or decay. A recognizable focal effect usually benefits from lower wetness and longer grains. Use zero/zero source bounds for a new or generated sample; its duration is unknown until decoded.
@@ -196,17 +213,23 @@ Physical voices start from the supplied source preset for the chosen model. Retu
 Compose a fresh note sequence for EVERY physical instrument on EVERY composition request, including percussion. The physicalSequences context gives the active pattern to avoid repeating. Change the actual interval contour or pitch selection to reflect the new brief, not only its root or rate. Settled scenes can use small steps, a returning anchor and spacious recurring notes; more tension can use a restrained unresolved turn; visible rising or falling movement can inform contour. Keep the voice's role and tonal center coherent with the other physical parts. Compose 4–16 integer offsets using the supplied limits; no example melody is supplied. Never copy the active pattern. Include the motif's musical relationship to this brief in intent.
 The generated artwork sound is a gently audible environmental layer, not a barely audible accent: use 650–2000 ms grains, overlap 1.2–2.5, moderate grain amplitude and modest wetness. Keep enough bandwidth to hear the source and avoid tiny chopped grains that destroy its identity. Use the full generated sample window.
 Use controls.effects and connections to understand which sources feed each effect and whether it reaches master. Source IDs in cables are source:<numeric id>; effects use their exact string IDs. Master controls only output gain. Never return effect controls inside a source or master. Preserve topology and bypass state. Disconnected and bypassed effects cannot shape the audible composition: retain their current parameters. A shared effect must suit all its incoming voices. Several effects in series accumulate, so choose one main space/echo character per path and keep other stages restrained. A low-pass filter can soften a melody without erasing its attack; avoid extreme resonance. For a generated artwork sound preserve enough bandwidth to recognize it. Reverb after delay smears repeats; moderate wetness around or below 0.4 retains their definition. A filter before delay colors each attack; after delay it colors the entire trail. Compose using the actual order. With no delay node, create space using the available routing and sparse notes. Do not invent a hidden effect. For melodic physical voices rate is at most 0.8/s and resonator decay at most 3 s.
+Piano_sampler instruments play occasional chord gestures using the playable keyboard in controls.pianoGestures. Return all piano controls and a small collection of fresh gestures, each with a short label and 2–8 distinct note events: absolute MIDI key, offsetMs from the chord onset, and velocity 0.05–1. Use only the available keys in controls.pianoGestures. Every gesture begins with offsetMs=0 and fits within 2000 ms. Express rising, falling, or softly overlapping contours through the actual pitch order and tiny onset offsets. Choose intervals, inversions, register and tonal ambiguity from the brief; do not automatically reuse one named chord or the current gestures. Often 3–5 notes and a 60–400 ms attack span work well, with pauses within 6–30 seconds and quiet but audible velocities. Choose shorter pauses for a responsive harmonic presence and longer pauses for more space. Both gap controls must be within 6–30 seconds, with gapMinSeconds <= gapMaxSeconds. The gap controls govern intervals between chord starts; they are not note delays. Allow the recording and connected delay/reverb to ring before the next appearance. Every available key is playable even when not individually recorded: the sampler selects its SFZ region and automatically transposes from pitch_keycenter. Compose desired sounding MIDI pitches without limiting harmony to sampled roots. canSustain keys loop according to the SFZ through hold and release; other keys decay naturally and end at the recording boundary. Choose register, hold and release accordingly, with connected effects carrying the atmosphere. Do not return root pitches, loop settings or sample filenames in gestures. If fewer than two keys are available return gestures=[] and keep that voice silent. Connect the harmonic choices to the painting or intention in intent. No example chord is supplied.
 Spectral effects perform phase-vocoder resynthesis: pitch shifts move partials while preserving their phase evolution, smear softens detail into a sustained spectrum, and freeze holds the current spectral frame. Use subtle pitch changes and low-to-moderate smear for ambient beds; leave freeze off unless a held spectral moment suits the brief. For each source and effect return intent: one short explanation linking specific parameter choices to its role, connected sources and the brief. This is a concise design explanation, not private reasoning. Return composed values in the structure defined by outputSchema. Keep master headroom, while using the module-gain ranges above to make sources clearly audible.`;
 
 export function parameterPrompt(brief: MusicalBrief, snapshot: PatchSnapshot, recent: string[]): string {
   const sources = chooseSources(brief, snapshot, recent);
   const modular = snapshot.effects !== undefined;
   return JSON.stringify({ brief, sources, controls: buildParameterContext(snapshot),
+    editPolicy: { editableModuleIds: snapshot.modules.map((module) => module.id), editableEffectIds: snapshot.effects?.map((effect) => effect.id),
+      masterIgnored: snapshot.ignoredNodes?.includes('master') ?? false, ignoredNodes: snapshot.ignoredNodes ?? [], readOnlyNodes: snapshot.readOnly,
+      lockedParameters: lockedParameterContext(snapshot),
+      instruction: 'Return entries only for editableModuleIds and editableEffectIds. Use [] when a list is empty. Protected nodes are musical/routing context only; keep their current parameters, samples, notes, gestures and evolution. Individually lockedParameters must equal their supplied current values (the schema uses const). These are authored base values; existing LFOs continue. Compose the unlocked controls around them, including ordered min/max pairs and playable notes around a locked rootNote. Locked gains override level budgets, and locked effect values override atmospheric defaults. A locked sequence or gestures is retained, so do not require a fresh motif there. Account for existing harmony and levels. When masterIgnored is true return master={}. The schema and this edit policy supersede older saved prompts requiring all nodes or fresh notes.' },
     routingContract: modular ? 'Use independent effects[] for every current effect. Source nodes are dry and master has gain only. The supplied schema takes precedence over older saved instructions about built-in effects. Preserve connections and bypass.' : undefined,
+    pianoContract: snapshot.modules.some((module) => module.type === 'piano_sampler') ? 'For piano_sampler, use controls.piano and controls.pianoGestures. Both pause controls must be 6–30 seconds, with gapMinSeconds <= gapMaxSeconds; these current ranges supersede older saved instructions about longer pauses. Every availableKey is playable; SFZ transposition and sustain loops are handled automatically by the sampler. This current bank contract supersedes older saved instructions requiring one exact recording per note or forbidding transposition/loops. Compose fresh, contemplative chord gestures with desired sounding MIDI keys, onset offsets in milliseconds and note velocities. These are occasional harmonic appearances, not a constant arpeggio. Connect specific voicings, register, contour, attack span and pause lengths to the brief. The schema takes precedence over older saved instructions about instrument types. No sample filenames, rootNote, sequence, density, or physical model in a piano source.' : undefined,
     physicalPresets: modular ? Object.fromEntries(Object.entries(physicalPresets).map(([model, parameters]) => [model, Object.fromEntries(Object.entries(parameters).filter(([key]) => !isSourceEffectParameter(key)))])) : physicalPresets,
     physicalSequences: snapshot.modules.flatMap((module) => module.type === 'physical' ? [{
       id: module.id, currentRootNote: module.parameters.rootNote, currentSequence: module.sequence,
-      requiredOutput: 'sequence: a newly composed array of semitone offsets from the requested rootNote, different from currentSequence',
+      requiredOutput: parameterIsIgnored(snapshot, `source:${module.id}`, 'sequence') ? 'Retain currentSequence exactly; its individual lock overrides motif freshness.' : 'sequence: a newly composed array of semitone offsets from the requested rootNote, different from currentSequence',
       minLength: 4, maxLength: 16, minOffset: -12, maxOffset: 24, minMidiNote: 48, maxMidiNote: 96,
     }] : []),
     atmosphericRules: modular ? {
@@ -234,18 +257,22 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
     // Recover the common valid JSON variant where an LLM keyed modules by ID/label.
     moduleValues = Object.entries(raw.modules as Record<string, unknown>).map(([key, value]) => {
       const module = object(value, `parameters module ${key}`);
-      const match = snapshot.modules.find((current) => String(current.id) === key || current.label === key);
+      const match = [...snapshot.modules, ...(snapshot.readOnly?.modules ?? [])].find((current) => String(current.id) === key || current.label === key);
       return module.id === undefined && match ? { ...module, id: match.id } : module;
     });
   } else throw new Error('Parameter response must contain a modules array (or an object keyed by module ID)');
   const byId = new Map<number, Record<string, unknown>>();
   for (const value of moduleValues) {
     const m = object(value, 'parameters module');
+    if (typeof m.id === 'number' && snapshot.ignoredNodes?.includes(`source:${m.id}`)) {
+      corrections.push(`Ignored proposed settings for protected source:${m.id}`); continue;
+    }
     if (typeof m.id !== 'number' || byId.has(m.id) || !snapshot.modules.some((s) => s.id === m.id)) throw new Error('Unknown/duplicate parameter module');
     byId.set(m.id, m);
   }
   const missing = snapshot.modules.filter((module) => !byId.has(module.id)).map((module) => `${module.label} (id ${module.id})`);
   if (missing.length) throw new Error(`Parameter response is missing ${missing.join(', ')}; return exactly one entry for each required module ID: ${snapshot.modules.map((module) => module.id).join(', ')}`);
+  protectResponseFields({ ...raw, modules: [...byId.values()] }, snapshot);
   function normalize(value: unknown, fallback: number, min: number, max: number, step: number, path: string): number {
     if (value === undefined) return fallback;
     if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${path} must be a finite number`);
@@ -259,8 +286,23 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
     const m = byId.get(current.id)!;
     if (m.type !== current.type) throw new Error('Parameter response changed an instrument type');
     const choice = choices.find((b) => b.id === current.id)!;
+    const nodeId = `source:${current.id}`;
     const params = object(m.parameters, 'parameters');
     parameterReasons[current.id] = shortText(m.intent, 'parameter intent');
+    if (current.type === 'piano_sampler') {
+      const parameters = { ...pianoDefaults };
+      for (const c of pianoControls) {
+        if (params[c.key] === undefined) throw new Error(`${current.label}.${c.key} must be explicitly composed`);
+        parameters[c.key] = normalize(params[c.key], parameters[c.key], c.min, c.max, c.step, `${current.label}.${c.key}`);
+      }
+      if (parameters.gapMinSeconds > parameters.gapMaxSeconds) {
+        parameters.gapMinSeconds = parameters.gapMaxSeconds;
+        corrections.push(`${current.label}: shortened minimum pause to keep interval bounds ordered`);
+      }
+      parameters.gain = Math.min(parameters.gain, choice.levelBudget);
+      return { id: current.id, type: current.type, parameters: preserveParameterValues(parameters, current.parameters, snapshot, nodeId),
+        gestures: parsePianoGestures(m.gestures, current.bank.samples.map((sample) => sample.midi), current.label) };
+    }
     if (current.type === 'physical') {
       let p = { ...physicalPresets[choice.model!] };
       if (params.model !== undefined && params.model !== choice.model) corrections.push(`${current.label}.model: using brief model ${choice.model} instead of ${String(params.model)}`);
@@ -285,8 +327,10 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
       }
       if (p.gain > choice.levelBudget) corrections.push(`${current.label}.gain: ${p.gain} → ${choice.levelBudget} (role budget)`);
       p.gain = Math.min(p.gain, choice.levelBudget);
-      const requestedSequence = parsePhysicalSequence(m.sequence, p.rootNote, current.label);
-      const sequence = freshPhysicalSequence(requestedSequence, current.sequence, p.rootNote, brief.axes);
+      p = preserveParameterValues(p, current.parameters, snapshot, nodeId);
+      const sequenceIgnored = parameterIsIgnored(snapshot, nodeId, 'sequence');
+      const requestedSequence = sequenceIgnored ? [...current.sequence] : parsePhysicalSequence(m.sequence, p.rootNote, current.label);
+      const sequence = sequenceIgnored ? requestedSequence : freshPhysicalSequence(requestedSequence, current.sequence, p.rootNote, brief.axes);
       if (sequence.some((note, index) => note !== requestedSequence[index])) {
         corrections.push(`${current.label}.sequence: ${JSON.stringify(requestedSequence)} → ${JSON.stringify(sequence)} (model repeated the active motif; varied an internal note using the brief's atmosphere)`);
       }
@@ -328,36 +372,43 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
       }
     }
     if (sample !== current.sample || choice.source === 'sfx') p.selectionStart = p.selectionEnd = 0;
+    Object.assign(p, preserveParameterValues(p, current.parameters, snapshot, nodeId));
     const requestedOverlap = bounded(m.targetOverlap ?? choice.overlap, 'targetOverlap', 0.05, 8);
     const overlap = choice.source === 'sfx' ? Math.max(1.2, Math.min(2.5, requestedOverlap)) : requestedOverlap;
     const density = normalize(overlap / ((p.lengthMin + p.lengthMax) / 2000), p.density, 0.1, 60, 0.1, `${current.label}.derivedDensity`);
     corrections.push(`${current.label}: density ${density}/s from overlap ${overlap} and mean grain ${(p.lengthMin + p.lengthMax) / 2}ms`);
-    p.density = density;
-    const estimatedOverlap = density * (p.lengthMin + p.lengthMax) / 2000;
-    grainBehavior.push({ id: current.id, targetOverlap: overlap, estimatedOverlap, meanGrainMs: (p.lengthMin + p.lengthMax) / 2, density });
+    if (!parameterIsIgnored(snapshot, nodeId, 'density')) p.density = density;
+    const estimatedOverlap = p.density * (p.lengthMin + p.lengthMax) / 2000;
+    grainBehavior.push({ id: current.id, targetOverlap: overlap, estimatedOverlap, meanGrainMs: (p.lengthMin + p.lengthMax) / 2, density: p.density });
     // Bound summed grain energy as well as channel gain; this is headroom, not loudness normalization.
     const gainCap = Math.min(choice.levelBudget, choice.levelBudget / Math.sqrt(Math.max(1, estimatedOverlap)));
     if (p.gain > gainCap) corrections.push(`${current.label}.gain: ${p.gain} → ${gainCap.toFixed(2)} (role/overlap budget)`);
     const gain = choice.source === 'sfx' ? Math.max(Math.min(0.1, gainCap), Math.min(p.gain, gainCap)) : Math.min(p.gain, gainCap);
     if (gain > p.gain) corrections.push(`${current.label}.gain: ${p.gain} → ${gain.toFixed(2)} (audible artwork texture)`);
     p.gain = Math.floor(gain * 100) / 100;
-    return { id: current.id, type: current.type, sample, parameters: p };
+    return { id: current.id, type: current.type, sample, parameters: preserveParameterValues(p, current.parameters, snapshot, nodeId) };
   });
   const masterRaw = object(raw.master, 'master');
-  const master = modular ? { ...snapshot.master } : { ...masterDefaults };
-  for (const c of masterControlDefinitions) if (!modular || c.key === 'gain') master[c.key] = normalize(masterRaw[c.key], master[c.key], c.min, c.max, c.step, `master.${c.key}`);
-  if (master.reverbMix > 0.5) { corrections.push(`master.reverbMix: ${master.reverbMix} → 0.5 (preserve artwork detail and stereo echoes)`); master.reverbMix = 0.5; }
-  if (master.gain > 0.85) { corrections.push(`master.gain: ${master.gain} → 0.85 (headroom)`); master.gain = 0.85; }
-  const gainEnergy = Math.sqrt(modules.reduce((sum, m) => sum + m.parameters.gain ** 2, 0));
-  const maxGainEnergy = 1.35;
+  const masterIgnored = snapshot.ignoredNodes?.includes('master');
+  const master = modular || masterIgnored ? { ...snapshot.master } : { ...masterDefaults };
+  if (!masterIgnored) {
+    for (const c of masterControlDefinitions) if (!modular || c.key === 'gain') master[c.key] = normalize(masterRaw[c.key], master[c.key], c.min, c.max, c.step, `master.${c.key}`);
+    if (master.reverbMix > 0.5) { corrections.push(`master.reverbMix: ${master.reverbMix} → 0.5 (preserve artwork detail and stereo echoes)`); master.reverbMix = 0.5; }
+    if (master.gain > 0.85) { corrections.push(`master.gain: ${master.gain} → 0.85 (headroom)`); master.gain = 0.85; }
+  }
+  Object.assign(master, preserveParameterValues(master, snapshot.master, snapshot, 'master'));
+  const adjustableModules = modules.filter((module) => !parameterIsIgnored(snapshot, `source:${module.id}`, 'gain'));
+  const gainEnergy = Math.sqrt(adjustableModules.reduce((sum, m) => sum + m.parameters.gain ** 2, 0));
+  const fixedGainSquared = [...(snapshot.readOnly?.modules ?? []), ...modules.filter((module) => parameterIsIgnored(snapshot, `source:${module.id}`, 'gain'))].reduce((sum, module) => sum + module.parameters.gain ** 2, 0);
+  const maxGainEnergy = Math.sqrt(Math.max(0, 1.35 ** 2 - fixedGainSquared));
   if (gainEnergy > maxGainEnergy) {
     const scale = maxGainEnergy / gainEnergy;
-    corrections.push(`Combined module gain energy ${gainEnergy.toFixed(2)} scaled to ${maxGainEnergy.toFixed(2)} RMS headroom`);
-    for (const m of modules) m.parameters.gain = Math.floor(m.parameters.gain * scale * 100) / 100;
+    corrections.push(`Editable module gain energy ${gainEnergy.toFixed(2)} scaled to ${maxGainEnergy.toFixed(2)} RMS headroom${fixedGainSquared ? ' while preserving ignored voices' : ''}`);
+    for (const m of adjustableModules) m.parameters.gain = Math.floor(m.parameters.gain * scale * 100) / 100;
   }
   const effects = parseEffects(raw.effects, snapshot);
   if (effects) {
-    fitMelodicEffects(effects, snapshot, modules.filter((module) => module.type === 'physical' && module.parameters.model !== 'percussion').map((module) => module.id), corrections);
+    fitMelodicEffects(effects, snapshot, [...modules, ...(snapshot.readOnly?.modules ?? [])].filter((module) => module.type === 'piano_sampler' || (module.type === 'physical' && module.parameters.model !== 'percussion')).map((module) => module.id), corrections);
     for (const effect of effects) {
       const input = (raw.effects as Record<string, unknown>[]).find((item) => item.id === effect.id)!;
       parameterReasons[effect.id] = shortText(input.intent, `${effect.id}.intent`);
@@ -365,7 +416,8 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
       if (route.bypass || !route.reachesMaster || !route.sourceIds.length) effect.parameters = { ...route.parameters };
     }
   }
-  const plan = parsePatchPlan(JSON.stringify({ master, modules, effects }), snapshot);
+  const protectedPlan = preservePlanParameters({ master, modules, effects }, snapshot);
+  const plan = preservePlanParameters(parsePatchPlan(JSON.stringify(protectedPlan), snapshot), snapshot);
   const changes: CompositionDebug['changes'] = [];
   for (const m of plan.modules) {
     const before = snapshot.modules.find((b) => b.id === m.id)!;
@@ -376,6 +428,7 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
     }
     if (m.type === 'granular' && before.type === 'granular') changes.push({ id: m.id, key: 'sample', before: before.sample, after: m.sample });
     if (m.type === 'physical' && before.type === 'physical') changes.push({ id: m.id, key: 'sequence', before: before.sequence, after: m.sequence });
+    if (m.type === 'piano_sampler' && before.type === 'piano_sampler') changes.push({ id: m.id, key: 'gestures', before: before.gestures, after: m.gestures });
   }
   for (const effect of plan.effects ?? []) {
     const before = snapshot.effects!.find((node) => node.id === effect.id)!;
@@ -383,6 +436,6 @@ export function composePatch(text: string, brief: MusicalBrief, snapshot: PatchS
   }
   for (const key of Object.keys(master) as (keyof typeof master)[]) if (master[key] !== snapshot.master[key]) changes.push({ id: 'master', key, before: snapshot.master[key], after: master[key] });
   return { plan, movement: brief.evolution, keywords: new Map(brief.modules.filter((m) => m.keyword).map((m) => [m.id, m.keyword!])),
-    debug: { corrections, parameterReasons, changes, grainBehavior, selections: choices.map((c) => ({ id: c.id, role: c.role, source: c.keyword ? `Generated: ${c.keyword}` : c.sample ?? c.model!,
+    debug: { corrections, parameterReasons, changes, grainBehavior, selections: choices.map((c) => ({ id: c.id, role: c.role, source: c.keyword ? `Generated: ${c.keyword}` : c.sample ?? c.model ?? 'Piano key bank',
       reason: `${c.reason} ${c.selectionReason}`.trim(), levelBudget: c.levelBudget })) } };
 }

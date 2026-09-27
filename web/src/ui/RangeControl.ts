@@ -1,4 +1,5 @@
 import type { RangeControlDefinition } from '../parameters';
+import { bindParameterSlider } from './ParameterSlider';
 
 const LOG_SLIDER_STEPS = 1000;
 
@@ -156,5 +157,10 @@ export function createRangeControl(
     },
   };
   control.setValues(initialLower, initialUpper);
+  for (const input of [lowerInput, upperInput]) bindParameterSlider(input, {
+    read: () => positionToValue(Number(input.value)),
+    write: (value) => { input.value = String(valueToPosition(value)); render(); },
+    bounds: () => ({ min: boundMin, max: boundMax }),
+  });
   return control;
 }

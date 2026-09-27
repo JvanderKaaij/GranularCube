@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI, APIError as OpenAIAPIError, AuthenticationError as OpenAIAuthError, RateLimitError as OpenAIRateLimitError
 from elevenlabs.client import AsyncElevenLabs
+from setup_store import create_setup_router
+from piano_bank import create_piano_router
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,6 +41,8 @@ app.add_middleware(
 
 # Mount static folder for serving generated audio files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(create_setup_router(Path(__file__).resolve().parent / "data", SAMPLES_DIR))
+app.include_router(create_piano_router(SAMPLES_DIR / "piano"))
 
 
 @app.get("/api/samples")

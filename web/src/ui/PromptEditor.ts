@@ -4,6 +4,7 @@ export interface PromptSettings { briefSystem: string; parameterSystem: string; 
 export interface PromptEditor {
   root: HTMLElement;
   getSettings(): PromptSettings;
+  applySettings(settings: PromptSettings): void;
   beginRun(): void;
   recordRequest(title: string, prompt: string, system?: string): void;
 }
@@ -41,7 +42,20 @@ const retiredGuidance: [string, string][] = [
     'Amp range is per grain; overlapping grains add energy, so keep overlap intentional, but do not default every module to a quiet level.'],
   ['The master gain and module gain are ceilings, not targets to maximize.',
     'Keep master headroom, while using the module-gain ranges above to make sources clearly audible.'],
+  ['Piano_sampler voices use a bank of individually recorded piano keys.',
+    'Piano_sampler voices use recorded piano samples mapped across playable keys, including SFZ zones with automatic transposition.'],
+  ['Piano_sampler instruments play occasional chord gestures from exact recorded keys.',
+    'Piano_sampler instruments play occasional chord gestures using the playable keyboard in controls.pianoGestures.'],
+  ['with pauses of roughly 20–60 seconds and quiet but audible velocities.',
+    'with pauses within 6–30 seconds and quiet but audible velocities. Both gap controls must be within 6–30 seconds, with gapMinSeconds <= gapMaxSeconds.'],
+  ['A sample cannot sustain beyond its recording; no transposition, sample looping, or invented keys.',
+    'Every available key is playable: the sampler automatically transposes its mapped recording from the SFZ root pitch. canSustain keys loop through hold and release; other keys decay naturally and end at the recording boundary. Compose desired sounding MIDI notes, without limiting harmony to recorded roots.'],
 ];
+
+function migrateGuidance(value: string): string {
+  for (const [oldText, newText] of retiredGuidance) value = value.split(oldText).join(newText);
+  return value;
+}
 
 export function createPromptEditor(): PromptEditor {
   const root = document.createElement('div');
@@ -77,9 +91,7 @@ export function createPromptEditor(): PromptEditor {
         const saved = (value as Record<string, unknown>)[key];
         if (typeof saved === 'string') {
           let updated = saved;
-          if (key !== 'sfxTemplate') {
-            for (const [oldText, newText] of retiredGuidance) updated = updated.split(oldText).join(newText);
-          }
+          if (key !== 'sfxTemplate') updated = migrateGuidance(saved);
           storedOverrides[key] = updated;
           if (updated !== saved) migrated = true;
         }
@@ -138,6 +150,13 @@ export function createPromptEditor(): PromptEditor {
 
   return {
     root,
+    applySettings(saved) {
+      validateSfxTemplate(saved.sfxTemplate);
+      settings = { ...saved, briefSystem: migrateGuidance(saved.briefSystem), parameterSystem: migrateGuidance(saved.parameterSystem) };
+      for (const [key, input] of inputs) input.value = settings[key];
+      transcript.replaceChildren(); copyStatus.textContent = '';
+      saveStatus.textContent = 'Prompts loaded from the server setup. Save the setup to keep further changes.';
+    },
     getSettings() {
       if (!settings.briefSystem.trim()) throw new Error('Enter brief instructions or reset that prompt.');
       if (!settings.parameterSystem.trim()) throw new Error('Enter parameter instructions or reset that prompt.');

@@ -2,7 +2,9 @@ import { PhysicalEngine } from '../audio/PhysicalEngine';
 import type { PhysicalSnapshot } from '../ai/PatchPlan';
 import { physicalSourceGroups, type PhysicalParameters } from '../parameters';
 import { ParameterLfoControl } from './ParameterLfoControl';
+import { createParameterLock } from './ParameterLock';
 import type { ParameterLfoMap } from '../audio/ParameterLfo';
+import { configureParameterSlider, readSliderValue, writeSliderValue } from './ParameterSlider';
 
 type PhysicalParameter = keyof PhysicalParameters;
 
@@ -25,6 +27,7 @@ export interface PhysicalPanel {
   getSnapshot(): PhysicalSnapshot;
   applyParameters(parameters: PhysicalParameters): void;
   lfos: ParameterLfoMap;
+  applyLfos(settings: ParameterLfoMap): void;
   applySequence(sequence: number[]): void;
   start(): Promise<void>;
   stop(): void;
@@ -60,6 +63,12 @@ export function createPhysicalPanel(
   const controls = root.querySelector<HTMLElement>('.module-controls')!;
   const sequenceNotes = root.querySelector<HTMLOutputElement>('.physical-sequence-notes')!;
   const modelSelect = root.querySelector<HTMLSelectElement>('.physical-model select')!;
+  const modelHeading = root.querySelector<HTMLElement>('.physical-model > label')!;
+  const modelLockHost = document.createElement('span'); modelLockHost.className = 'parameter-lock-heading';
+  modelHeading.replaceWith(modelLockHost); modelLockHost.append(modelHeading);
+  createParameterLock(modelLockHost, 'model');
+  const sequenceHeading = root.querySelector<HTMLElement>('.physical-sequence > span')!;
+  sequenceHeading.classList.add('parameter-lock-heading'); createParameterLock(sequenceHeading, 'sequence');
   const lfos: ParameterLfoMap = {};
   const lfoByKey = new Map<string, ParameterLfoControl>();
   const syncLfos = () => engine.setParameterLfos(lfos);
@@ -97,12 +106,13 @@ export function createPhysicalPanel(
       const initial = engine.currentParameters[definition.key];
       row.innerHTML = `<span class="control-heading"><span class="control-label">${definition.label.toUpperCase()}</span><output>${formatValue(definition.key, initial, definition.unit)}</output></span><input data-param="${definition.key}" type="range" min="${definition.min}" max="${definition.max}" step="${definition.step}" value="${initial}" aria-label="${label} ${definition.label}" />`;
       const input = row.querySelector<HTMLInputElement>('input')!;
+      configureParameterSlider(input, definition, initial);
       const output = row.querySelector<HTMLOutputElement>('output')!;
       lfoByKey.set(definition.key, new ParameterLfoControl(row.querySelector<HTMLElement>('.control-heading')!, definition.key, input, (settings) => { lfos[definition.key] = settings; syncLfos(); }, (value) => formatValue(definition.key, value, definition.unit)));
       input.addEventListener('input', () => {
-        const value = Number(input.value);
+        const value = readSliderValue(input);
         engine.setParameter(definition.key, value);
-        input.value = String(engine.currentParameters[definition.key]);
+        writeSliderValue(input, engine.currentParameters[definition.key]);
         output.value = formatValue(definition.key, engine.currentParameters[definition.key], definition.unit);
         if (definition.key === 'rootNote') renderSequence();
       });
@@ -147,6 +157,7 @@ export function createPhysicalPanel(
     label,
     engine,
     lfos,
+    applyLfos(settings) { for (const [key, settingsForKey] of Object.entries(settings)) lfoByKey.get(key)?.applySettings(settingsForKey); },
     getSnapshot() {
       return { id, type: 'physical', label, playing: engine.isPlaying, parameters: engine.currentParameters, sequence: engine.currentSequence };
     },
@@ -156,11 +167,10 @@ export function createPhysicalPanel(
       for (const group of physicalSourceGroups) {
         for (const definition of group.controls) {
           const input = controls.querySelector<HTMLInputElement>(`[data-param="${definition.key}"]`)!;
-          input.value = String(parameters[definition.key]);
-          const value = Number(input.value);
-          engine.setParameter(definition.key, value);
+          engine.setParameter(definition.key, parameters[definition.key]);
+          const value = engine.currentParameters[definition.key];
           lfoByKey.get(definition.key)?.setBase(value);
-          input.value = String(engine.currentParameters[definition.key]);
+          writeSliderValue(input, value);
           input.closest('.control')!.querySelector<HTMLOutputElement>('output')!.value = formatValue(definition.key, engine.currentParameters[definition.key], definition.unit);
         }
       }

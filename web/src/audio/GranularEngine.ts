@@ -48,6 +48,8 @@ export class GranularEngine {
   get sampleDurationMs(): number {
     return (this.buffer?.duration ?? 0) * 1000;
   }
+  get sampleBuffer(): AudioBuffer | null { return this.buffer; }
+  get currentMovement(): Movement | null { return this.motion.currentSettings; }
 
   get currentParameters(): Parameters {
     return { ...this.parameters };

@@ -5,10 +5,10 @@ import { parameterLfoValue, type ParameterLfoMap } from './ParameterLfo';
 export type EffectKind = 'filter' | 'delay' | 'reverb' | 'spectral';
 export type EffectValues = Record<string, number | string | boolean>;
 export interface EffectSnapshot { id: string; type: EffectKind; parameters: EffectValues; bypass: boolean }
-export interface EffectControl { key: string; label: string; min: number; max: number; step: number; unit?: string; moodEffect: string }
+export interface EffectControl { key: string; label: string; min: number; max: number; step: number; scale?: 'linear' | 'log'; unit?: string; moodEffect: string }
 export const effectControls: Record<EffectKind, EffectControl[]> = {
   filter: [
-    { key: 'cutoff', label: 'Cutoff', min: 20, max: 20000, step: 1, unit: 'Hz', moodEffect: 'Low-pass darkens as cutoff falls; high-pass thins as cutoff rises. Band-pass focuses a band and notch removes one.' },
+    { key: 'cutoff', label: 'Cutoff · log', min: 20, max: 20000, step: 1, scale: 'log', unit: 'Hz', moodEffect: 'Low-pass darkens as cutoff falls; high-pass thins as cutoff rises. Band-pass focuses a band and notch removes one.' },
     { key: 'resonance', label: 'Resonance', min: 0.1, max: 12, step: 0.1, moodEffect: 'Emphasizes the cutoff. Modest resonance keeps atmospheric layers smooth.' },
   ],
   delay: [

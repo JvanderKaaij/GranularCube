@@ -1,21 +1,33 @@
-import { type PatchPlan, type PatchSnapshot } from './PatchPlan';
+import { compositionSnapshot, type PatchPlan, type PatchSnapshot } from './PatchPlan';
 import { PATCH_TRANSITION_MS } from './PatchTransition';
 import { requestImagePatch } from './ImageClient';
 import { requestAvailableSamples, requestSoundEffect } from './SfxClient';
 import { requestChat } from './ChatClient';
 import { briefPrompt, parseBrief, parameterPrompt, composePatch, type ApplicationOptions, type ApplicationReport } from './Composition';
 import { createPromptEditor, type PromptSettings } from '../ui/PromptEditor';
-import { OPENAI_MODELS, isOpenAIModel } from './OpenAIModels';
+import type { ModelSelection } from './OpenAIModels';
+import { sampleIsFixed } from './ParameterPolicy';
 
-const MODEL_STORAGE_KEY = 'granularcube.openai-models.v1';
-
-export interface MoodController { root: HTMLElement; updateOverview(): void; cancelPending(): void }
+export interface MoodSettings {
+  intention: string;
+  transitionSeconds: number;
+  evolutionEnabled: boolean;
+  prompts: PromptSettings;
+}
+export interface MoodController {
+  root: HTMLElement;
+  updateOverview(): void;
+  cancelPending(): void;
+  getSettings(): MoodSettings;
+  applySettings(settings: MoodSettings): void;
+}
 export function createMoodController(
   getSnapshot: () => PatchSnapshot,
   applyPlan: (plan: PatchPlan, durationMs: number, onProgress: (progress: number) => void,
     generatedSamples?: Map<number, { keyword: string; audioUrl: string }>, startImageModules?: boolean,
     options?: ApplicationOptions) => Promise<ApplicationReport>,
   setEvolution: (enabled: boolean) => void = () => {},
+  getModels: () => ModelSelection = () => ({ text: 'gpt-6-sol', image: 'gpt-6-sol' }),
 ): MoodController {
   const root = document.createElement('section');
   root.className = 'mood-node';
@@ -24,10 +36,6 @@ export function createMoodController(
     <div class="mood-head"><span class="mood-symbol">◇</span><div><span class="node-kicker">COMPOSITION</span><h2>mood~</h2></div><button class="mood-close icon-button" type="button" aria-label="Collapse mood settings" title="Collapse mood settings">×</button></div>
     <div class="mood-flow">BRIEF → VOICES → SOUNDSCAPE</div>
     <div class="mood-body">
-      <details class="mood-details model-settings" open><summary>OPENAI MODELS</summary><div class="model-settings-grid">
-        <label class="mood-label" for="mood-text-model">MOOD & SYNTH PARAMETERS<select id="mood-text-model" class="model-select">${OPENAI_MODELS.map(({ id, label }) => `<option value="${id}" ${id === 'gpt-6-sol' ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-        <label class="mood-label" for="mood-image-model">PAINTING INTERPRETATION<select id="mood-image-model" class="model-select">${OPENAI_MODELS.map(({ id, label }) => `<option value="${id}" ${id === 'gpt-6-sol' ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-      </div><p class="model-help">Saved in this browser. Painting analysis and text composition can use different models.</p></details>
       <label class="mood-label" for="mood-prompt">MOOD / INTENTION</label>
       <textarea id="mood-prompt" rows="5" placeholder="Describe a mood, or interpret a painting below…"></textarea>
       <label class="mood-transition-label" for="mood-transition"><span>TRANSITION TIME</span><output id="mood-transition-value">${PATCH_TRANSITION_MS / 1000} s</output></label>
@@ -68,21 +76,6 @@ export function createMoodController(
   const progressValue = query<HTMLOutputElement>('.mood-progress output');
   const debugView = query<HTMLElement>('.pipeline-debug');
   const rawView = query<HTMLElement>('.pipeline-raw');
-  const textModel = query<HTMLSelectElement>('#mood-text-model');
-  const imageModel = query<HTMLSelectElement>('#mood-image-model');
-  try {
-    const saved = JSON.parse(localStorage.getItem(MODEL_STORAGE_KEY) ?? '{}');
-    if (saved && typeof saved === 'object') {
-      if (isOpenAIModel(saved.text)) textModel.value = saved.text;
-      if (isOpenAIModel(saved.image)) imageModel.value = saved.image;
-    }
-  } catch { /* Invalid browser preferences use the server's current default. */ }
-  const saveModels = () => {
-    try { localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify({ text: textModel.value, image: imageModel.value })); }
-    catch { /* Model choices still apply for this page session. */ }
-  };
-  textModel.addEventListener('change', saveModels);
-  imageModel.addEventListener('change', saveModels);
   const promptEditor = createPromptEditor();
   query<HTMLElement>('.prompt-tools-mount').append(promptEditor.root);
   query<HTMLButtonElement>('.mood-close').addEventListener('click', () => {
@@ -93,6 +86,7 @@ export function createMoodController(
   let active: AbortController | null = null;
   let previewUrl: string | null = null;
   const history: string[][] = [];
+  let settingsRevision = 0;
   const setStatus = (text: string, error = false) => {
     query<HTMLElement>('.mood-status').textContent = text;
     query<HTMLElement>('.mood-status').classList.toggle('error', error);
@@ -108,17 +102,47 @@ export function createMoodController(
     preview.querySelector('img')!.src = previewUrl ?? '';
     scene.textContent = composition.textContent = '';
   });
-  const controller: MoodController = { root, cancelPending: () => active?.abort(), updateOverview() {
-    query<HTMLElement>('.mood-current').textContent = JSON.stringify(getSnapshot(), null, 2);
-  } };
+  const controller: MoodController = {
+    root, cancelPending: () => active?.abort(),
+    updateOverview() { query<HTMLElement>('.mood-current').textContent = JSON.stringify(getSnapshot(), null, 2); },
+    getSettings() {
+      return { intention: prompt.value, transitionSeconds: Number(transition.value),
+        evolutionEnabled: query<HTMLInputElement>('.evolution-enabled').checked, prompts: promptEditor.getSettings() };
+    },
+    applySettings(settings) {
+      settingsRevision++;
+      active?.abort();
+      promptEditor.applySettings(settings.prompts);
+      prompt.value = settings.intention;
+      transition.value = String(settings.transitionSeconds);
+      query<HTMLOutputElement>('#mood-transition-value').value = `${settings.transitionSeconds.toFixed(1)} s`;
+      query<HTMLInputElement>('.evolution-enabled').checked = settings.evolutionEnabled;
+      setEvolution(settings.evolutionEnabled);
+      history.length = 0;
+      imageInput.value = '';
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = null; preview.hidden = true; preview.querySelector('img')!.removeAttribute('src');
+      scene.textContent = composition.textContent = '';
+      query<HTMLElement>('.mood-response').textContent = '—';
+      debugView.textContent = 'Setup loaded. Ready for a new composition.';
+      rawView.textContent = '—'; query<HTMLElement>('.pipeline-summary').textContent = '';
+      setStatus('Setup loaded. Ready to shape the current patch.');
+      controller.updateOverview();
+    },
+  };
 
   async function run(mode: 'mood' | 'image'): Promise<void> {
     if (active) return;
     const file = imageInput.files?.[0];
     if (mode === 'image' && !file) { setStatus('Choose a painting first.', true); return; }
     if (mode === 'mood' && !prompt.value.trim()) { setStatus('Describe a mood first.', true); return; }
-    const snapshot = getSnapshot();
-    if (!snapshot.modules.length) { setStatus('Add an instrument first.', true); return; }
+    const originalSnapshot = getSnapshot();
+    const snapshot = compositionSnapshot(originalSnapshot);
+    const runRevision = settingsRevision;
+    if (!originalSnapshot.modules.length) { setStatus('Add an instrument first.', true); return; }
+    if (!snapshot.modules.length && !snapshot.effects?.length && snapshot.ignoredNodes?.includes('master')) {
+      setStatus('Every node has IGNORE LLM enabled. Uncheck a node to compose new settings.', true); return;
+    }
     let prompts: PromptSettings;
     try { prompts = promptEditor.getSettings(); }
     catch (error) { setStatus(error instanceof Error ? error.message : String(error), true); return; }
@@ -127,19 +151,19 @@ export function createMoodController(
     const abort = new AbortController();
     active = abort;
     const durationMs = Number(transition.value) * 1000;
-    const selectedTextModel = textModel.value;
-    const selectedImageModel = imageModel.value;
+    const { text: selectedTextModel, image: selectedImageModel } = getModels();
     const modelForBrief = mode === 'image' ? selectedImageModel : selectedTextModel;
     const started = performance.now();
     const timings: Record<string, number> = {};
     const running = new Map<string, number>();
     const repairs: string[] = [];
-    const debug: Record<string, unknown> = { status: 'Preparing', repairs };
+    const debug: Record<string, unknown> = { status: 'Preparing', repairs, ignoredNodes: snapshot.ignoredNodes ?? [], ignoredParameters: snapshot.ignoredParameters ?? {} };
     const raw: Record<string, unknown> = { sfxPromptTemplate: prompts.sfxTemplate, models: { text: selectedTextModel, painting: selectedImageModel, brief: modelForBrief } };
     let timedOut = false;
     let internalFailure = false;
     const timeout = window.setTimeout(() => { timedOut = true; abort.abort(); }, 300_000);
     const render = () => {
+      if (runRevision !== settingsRevision) return;
       query<HTMLElement>('.pipeline-summary').textContent = [
         ...Object.entries(timings).map(([key, value]) => `${key}: ${(value / 1000).toFixed(1)}s`),
         ...[...running].map(([key, value]) => `${key}: ${((performance.now() - value) / 1000).toFixed(1)}s…`),
@@ -154,10 +178,11 @@ export function createMoodController(
       try { return await fn(); } finally { timings[name] = performance.now() - start; running.delete(name); render(); }
     };
     const validResponse = async <T,>(name: string, instruction: string, system: string, first: () => Promise<string>, parse: (text: string) => T, repair?: (instruction: string) => Promise<string>): Promise<T> => {
+      abort.signal.throwIfAborted();
       const model = name === 'brief' ? modelForBrief : selectedTextModel;
       const title = `${name === 'brief' ? (mode === 'image' ? 'Painting' : 'Mood') + ' brief' : 'Synth parameters & notes'} · ${model}`;
       promptEditor.recordRequest(title, instruction, system);
-      let text = await first(); raw[`${name}Response`] = text;
+      let text = await first(); abort.signal.throwIfAborted(); raw[`${name}Response`] = text;
       for (let attempt = 0; attempt < 3; attempt++) {
         try { return parse(text); }
         catch (error) {
@@ -183,7 +208,8 @@ export function createMoodController(
     try {
       setStatus('Interpreting atmosphere, roles and sound sources…');
       const recent = history.flat();
-      const availableSamples = await timed('sampleAvailability', () => requestAvailableSamples(abort.signal));
+      const availableSamples = snapshot.modules.some((module) => module.type === 'granular' && !sampleIsFixed(snapshot, module.id))
+        ? await timed('sampleAvailability', () => requestAvailableSamples(abort.signal)) : [];
       raw.availableSampleFilenames = availableSamples;
       const briefRequest = briefPrompt(snapshot, prompt.value.trim(), mode === 'image', recent, availableSamples, prompts.sfxTemplate);
       raw.briefPrompt = briefRequest;
@@ -200,9 +226,9 @@ export function createMoodController(
       const hasSfx = brief.modules.some((module) => module.source === 'sfx');
       debug.status = hasSfx ? 'Generating parameters and artwork sound in parallel' : 'Generating parameters with catalog samples';
       debug.sfx = hasSfx ? { status: 'Requested', requests: brief.modules.filter((module) => module.source === 'sfx').map((module) => ({ id: module.id, prompt: module.sfxPrompt, durationSeconds: 8, basis: brief.imageSound?.basis })) }
-        : { status: 'Not applicable: text request or no granular voice' };
+        : { status: 'Not applicable: text request, no editable granular voice, or all sample sources/windows are locked' };
       render();
-      setStatus(hasSfx ? `Generating an eight-second artwork sound: ${brief.imageSound?.source}…` : 'Brief ready. Composing voices with catalog samples…');
+      setStatus(hasSfx ? `Generating an eight-second artwork sound: ${brief.imageSound?.source}…` : 'Brief ready. Composing the available instruments…');
       const patchRequest = parameterPrompt(brief, snapshot, recent);
       raw.parameterPrompt = patchRequest;
       raw.parameterSystem = prompts.parameterSystem;
@@ -236,7 +262,7 @@ export function createMoodController(
         throw error;
       }
       abort.signal.throwIfAborted();
-      if (JSON.stringify(snapshot) !== JSON.stringify(getSnapshot())) throw new Error('Patch changed during composition. Retry to preserve your manual edits.');
+      if (JSON.stringify(originalSnapshot) !== JSON.stringify(getSnapshot())) throw new Error('Patch changed during composition. Retry to preserve your manual edits.');
       debug.decisions = result.debug;
       for (const change of result.debug.changes) if (change.key === 'sample' && typeof change.id === 'number' && generatedSamples.has(change.id)) change.after = `AI · ${generatedSamples.get(change.id)!.keyword}`;
       const report = await applyPlan(result.plan, durationMs, (progress) => {
@@ -252,6 +278,7 @@ export function createMoodController(
       timings.samplePreparation = report.decodeMs;
       timings.transition = report.transitionMs;
       debug.decodedSamples = report.samples;
+      if (report.piano?.length) debug.piano = report.piano;
       if (hasSfx) debug.sfx = { status: 'Decoded and installed', sources: Object.fromEntries(generatedSamples) };
       query<HTMLElement>('.mood-response').textContent = JSON.stringify({ brief, ...result.plan, actualAppliedState: getSnapshot(), generatedSources: Object.fromEntries(generatedSamples), movement: result.movement }, null, 2);
       history.push(result.plan.modules.flatMap((m) => m.type === 'granular' && !generatedSamples.has(m.id) ? [m.sample] : []));
@@ -265,7 +292,7 @@ export function createMoodController(
       abort.abort();
       const message = timedOut ? 'Request timed out.' : canceled ? 'Request canceled.' : error instanceof Error ? error.message : String(error);
       debug.status = 'Not completed'; debug.error = message;
-      setStatus(message, true);
+      if (runRevision === settingsRevision) setStatus(message, true);
     } finally {
       window.clearTimeout(timeout); window.clearInterval(interval);
       timings.total = performance.now() - started;

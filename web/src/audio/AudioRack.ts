@@ -1,6 +1,7 @@
 import { masterDefaults, type MasterParameters } from '../parameters';
 import { GranularEngine } from './GranularEngine';
 import { PhysicalEngine } from './PhysicalEngine';
+import { PianoSamplerEngine } from './PianoSamplerEngine';
 import { AudioGraph } from './AudioGraph';
 import { EffectNode, type EffectKind } from './EffectNode';
 
@@ -29,6 +30,13 @@ export class AudioRack {
   }
   get currentTime(): number { return this.context.currentTime; }
   async resume(): Promise<void> { await this.context.resume(); }
+  async prepareSample(url: string): Promise<AudioBuffer> {
+    const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+    if (!response.ok) throw new Error(`Saved sample could not be loaded (${response.status})`);
+    const buffer = await this.context.decodeAudioData(await response.arrayBuffer());
+    if (!buffer.length) throw new Error('Saved sample is empty');
+    return buffer;
+  }
 
   createGranular(id: string): GranularEngine {
     return this.addModule(id, (context, destination) => new GranularEngine(context, destination));
@@ -37,6 +45,7 @@ export class AudioRack {
   createPhysical(id: string): PhysicalEngine {
     return this.addModule(id, (context, destination) => new PhysicalEngine(context, destination));
   }
+  createPiano(id: string): PianoSamplerEngine { return this.addModule(id, (context, destination) => new PianoSamplerEngine(context, destination)); }
 
   createEffect(id: string, kind: EffectKind): EffectNode {
     const effect = new EffectNode(this.context, kind);

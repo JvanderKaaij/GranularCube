@@ -9,6 +9,7 @@ export const OPENAI_MODELS = [
 ] as const;
 
 export type OpenAIModel = typeof OPENAI_MODELS[number]['id'];
+export interface ModelSelection { text: OpenAIModel; image: OpenAIModel }
 export function isOpenAIModel(value: unknown): value is OpenAIModel {
   return typeof value === 'string' && OPENAI_MODELS.some((model) => model.id === value);
 }

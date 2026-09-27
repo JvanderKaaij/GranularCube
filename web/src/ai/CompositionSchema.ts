@@ -1,6 +1,8 @@
 import { granularControlGroups, physicalControlGroups, masterControlDefinitions, type PhysicalModel } from '../parameters';
 import type { PatchSnapshot } from './PatchPlan';
 import { effectControls, isSourceEffectParameter } from '../audio/EffectNode';
+import { pianoControls } from '../audio/PianoProgram';
+import { parameterIsIgnored, sampleIsFixed, currentParameterValue } from './ParameterPolicy';
 
 type Schema = Record<string, unknown>;
 const text = (maxLength = 900): Schema => ({ type: 'string', minLength: 1, maxLength });
@@ -11,14 +13,19 @@ const object = (properties: Record<string, Schema>, required = Object.keys(prope
   ({ type: 'object', properties, required, additionalProperties: false });
 const filterModes = ['lowpass', 'highpass', 'bandpass', 'notch'];
 
+function protectProperties(schema: Schema, snapshot: PatchSnapshot, id: string): void {
+  const properties = schema.properties as Record<string, Schema>;
+  for (const key of Object.keys(properties)) if (parameterIsIgnored(snapshot, id, key)) properties[key] = { const: currentParameterValue(snapshot, id, key) };
+}
+
 function modules(snapshot: PatchSnapshot, variants: Schema[]): Schema {
   return {
     type: 'array', minItems: snapshot.modules.length, maxItems: snapshot.modules.length,
     items: variants.length ? { oneOf: variants } : false,
-    allOf: snapshot.modules.map((module) => ({
+    ...(snapshot.modules.length ? { allOf: snapshot.modules.map((module) => ({
       contains: { type: 'object', properties: { id: { const: module.id } }, required: ['id'] },
       minContains: 1, maxContains: 1,
-    })),
+    })) } : {}),
   };
 }
 
@@ -26,17 +33,18 @@ function modules(snapshot: PatchSnapshot, variants: Schema[]): Schema {
 export function briefOutputSchema(snapshot: PatchSnapshot, image: boolean, availableSamples: string[]): Schema {
   const variants = snapshot.modules.map((module) => {
     const common = { id: { type: 'integer', const: module.id }, role: enumeration(['bed', 'texture', 'focal', 'accent']), weight: number(0.1, 1), reason: text() };
+    if (module.type === 'piano_sampler') return object(common);
     return module.type === 'physical'
-      ? object({ ...common, model: enumeration(['bell', 'percussion', 'string']) })
+      ? object({ ...common, model: parameterIsIgnored(snapshot, `source:${module.id}`, 'model') ? { const: module.parameters.model } : enumeration(['bell', 'percussion', 'string']) })
       : object({ ...common, overlap: number(0.05, 8),
-        sampleCandidates: { type: 'array', maxItems: 4, uniqueItems: true, items: enumeration(availableSamples) },
+        sampleCandidates: { type: 'array', maxItems: 4, uniqueItems: true, items: enumeration(sampleIsFixed(snapshot, module.id) ? [module.sample] : availableSamples) },
         reuseReason: { type: 'string', maxLength: 900 },
       }, [...Object.keys(common), 'overlap']);
   });
   const properties: Record<string, Schema> = {
     description: text(), era: text(200),
   };
-  const granularIds = snapshot.modules.filter((module) => module.type === 'granular').map((module) => module.id);
+  const granularIds = snapshot.modules.filter((module) => module.type === 'granular' && !sampleIsFixed(snapshot, module.id)).map((module) => module.id);
   if (image && granularIds.length) {
     properties.imageSound = object({
       evidence: text(400), moduleId: enumeration(granularIds), source: text(100), action: text(150), character: text(150),
@@ -59,6 +67,15 @@ export function parameterOutputSchema(snapshot: PatchSnapshot, sources: ChosenSo
   const variants = snapshot.modules.map((module) => {
     const source = sources.find((choice) => choice.id === module.id)!;
     const common = { id: { type: 'integer', const: module.id }, type: { const: module.type }, intent: text() };
+    if (module.type === 'piano_sampler') {
+      const keys = module.bank.samples.map((sample) => sample.midi);
+      return object({ ...common,
+        parameters: object(Object.fromEntries(pianoControls.map((control) => [control.key, number(control.min, control.max)]))),
+        gestures: { type: 'array', minItems: keys.length >= 2 ? 1 : 0, maxItems: keys.length >= 2 ? 8 : 0,
+          items: object({ label: text(120), notes: { type: 'array', minItems: 2, maxItems: 8,
+            items: object({ midi: { type: 'integer', enum: keys }, offsetMs: number(0, 2000), velocity: number(0.05, 1) }) } }) },
+      });
+    }
     if (module.type === 'physical') {
       const controls = Object.fromEntries(physicalControlGroups.flatMap((group) => group.controls.filter((control) => !modular || !isSourceEffectParameter(control.key)).map((control) => [control.key, number(control.min, control.max)])));
       return object({ ...common,
@@ -81,8 +98,14 @@ export function parameterOutputSchema(snapshot: PatchSnapshot, sources: ChosenSo
       targetOverlap: number(0.05, 8),
     });
   });
-  return object({
-    master: object(Object.fromEntries(masterControlDefinitions.filter((control) => !modular || control.key === 'gain').map((control) => [control.key, number(control.min, control.max)]))),
+  for (const variant of variants) {
+    const props = variant.properties as Record<string, Schema>;
+    const id = `source:${props.id.const}`;
+    protectProperties(props.parameters, snapshot, id);
+    for (const key of ['sequence', 'gestures']) if (props[key] && parameterIsIgnored(snapshot, id, key)) props[key] = { const: currentParameterValue(snapshot, id, key) };
+  }
+  const schema = object({
+    master: object(Object.fromEntries(masterControlDefinitions.filter((control) => !snapshot.ignoredNodes?.includes('master') && (!modular || control.key === 'gain')).map((control) => [control.key, number(control.min, control.max)]))),
     modules: modules(snapshot, variants),
     ...(modular ? { effects: {
       type: 'array', minItems: snapshot.effects!.length, maxItems: snapshot.effects!.length,
@@ -90,7 +113,14 @@ export function parameterOutputSchema(snapshot: PatchSnapshot, sources: ChosenSo
         id: { const: effect.id }, type: { const: effect.type }, intent: text(),
         parameters: object({ ...Object.fromEntries(effectControls[effect.type].map((control) => [control.key, number(control.min, control.max)])), ...(effect.type === 'filter' ? { filterType: enumeration(filterModes) } : {}), ...(effect.type === 'spectral' ? { freeze: boolean() } : {}) }),
       })) } : false,
-      allOf: snapshot.effects!.map((effect) => ({ contains: { type: 'object', properties: { id: { const: effect.id } }, required: ['id'] }, minContains: 1, maxContains: 1 })),
+      ...(snapshot.effects!.length ? { allOf: snapshot.effects!.map((effect) => ({ contains: { type: 'object', properties: { id: { const: effect.id } }, required: ['id'] }, minContains: 1, maxContains: 1 })) } : {}),
     } } : {}),
   });
+  const props = schema.properties as Record<string, Schema>;
+  protectProperties(props.master, snapshot, 'master');
+  if (modular && snapshot.effects!.length) for (const variant of (props.effects.items as { oneOf: Schema[] }).oneOf) {
+    const effect = variant.properties as Record<string, Schema>;
+    protectProperties(effect.parameters, snapshot, String(effect.id.const));
+  }
+  return schema;
 }
