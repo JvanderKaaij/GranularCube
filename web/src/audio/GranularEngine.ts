@@ -1,3 +1,5 @@
+import { audioLookAhead, startAudioClock, usesMobileClock } from './AudioClock';
+import { MobileGrainRenderer } from './MobileGrainRenderer';
 import { defaults, type Parameters } from '../parameters';
 import { AmbientMotion, type Movement } from './AmbientMotion';
 import type { ParameterLfoMap } from './ParameterLfo';
@@ -24,7 +26,7 @@ export class GranularEngine {
   private sampleBlendStart = 0;
   private sampleBlendSeconds = SAMPLE_BLEND_SECONDS;
   private pendingNewSampleGrain = false;
-  private timer: number | null = null;
+  private timer: (() => void) | null = null;
   private nextGrainTime = 0;
   private activeGrains = new Set<AudioBufferSourceNode>();
   private playing = false;
@@ -32,13 +34,21 @@ export class GranularEngine {
   private parameters: Parameters = { ...defaults };
   private readonly motion = new AmbientMotion(Math.random() * 20);
   private disposed = false;
+  private renderer: MobileGrainRenderer | null = null;
 
   constructor(context: AudioContext, destination: AudioNode) {
     this.context = context;
     this.output = context.createGain();
     this.output.gain.value = this.parameters.gain;
     this.output.connect(destination);
-
+    if (usesMobileClock(context) && typeof Worker !== 'undefined') {
+      try {
+        this.renderer = new MobileGrainRenderer(context, this.output, () => {
+          this.renderer?.dispose(); this.renderer = null;
+          this.nextGrainTime = context.currentTime + 0.02;
+        });
+      } catch { /* Fall back to native grains if workers are unavailable. */ }
+    }
   }
 
   get isPlaying(): boolean {
@@ -80,7 +90,7 @@ export class GranularEngine {
     this.previousBuffer = this.playing ? this.buffer : null;
     this.previousSelectionStart = this.parameters.selectionStart;
     this.previousSelectionEnd = this.parameters.selectionEnd;
-    this.sampleBlendStart = this.context.currentTime;
+    this.sampleBlendStart = this.renderer?.nextTime ?? this.context.currentTime;
     // A sample swap is a short handoff, independent of the longer parameter morph.
     this.sampleBlendSeconds = Math.min(MAX_SAMPLE_BLEND_SECONDS, Math.max(0.1, blendSeconds));
     this.buffer = decoded;
@@ -88,7 +98,7 @@ export class GranularEngine {
     this.parameters.selectionEnd = decoded.duration * 1000;
     // At low grain density the scheduler may otherwise wait many seconds on its old clock.
     if (this.playing) {
-      this.nextGrainTime = this.context.currentTime + 0.02;
+      this.nextGrainTime = this.renderer?.nextTime ?? this.context.currentTime + 0.02;
       this.pendingNewSampleGrain = true;
     }
     return this.sampleDurationMs;
@@ -120,15 +130,18 @@ export class GranularEngine {
     await context.resume();
     if (this.playing) return;
     this.playing = true;
-    this.nextGrainTime = context.currentTime + 0.02;
+    this.nextGrainTime = this.renderer?.nextTime ?? context.currentTime + 0.02;
     this.schedule();
-    this.timer = window.setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
+    this.timer = startAudioClock(this.context, () => this.schedule(), SCHEDULER_INTERVAL_MS);
   }
 
   stop(): void {
     this.playing = false;
-    if (this.timer !== null) window.clearInterval(this.timer);
+    if (this.timer !== null) this.timer();
     this.timer = null;
+    this.renderer?.stop();
+    this.output.gain.cancelScheduledValues(this.context.currentTime);
+    this.output.gain.setTargetAtTime(this.parameters.gain, this.context.currentTime, 0.02);
     for (const source of this.activeGrains) {
       try { source.stop(); } catch { /* Already stopped. */ }
     }
@@ -140,19 +153,24 @@ export class GranularEngine {
     this.disposed = true;
     ++this.sampleRequest;
     this.stop();
+    this.renderer?.dispose(); this.renderer = null;
     this.output.disconnect();
   }
 
   private schedule(): void {
     const context = this.context;
     if (!this.playing) return;
-    const horizon = context.currentTime + LOOK_AHEAD_SECONDS;
+    this.nextGrainTime = Math.max(this.nextGrainTime, this.renderer?.nextTime ?? context.currentTime);
+    const horizon = this.renderer
+      ? this.renderer.horizon(document.hidden ? 4 : 2)
+      : context.currentTime + audioLookAhead(context, LOOK_AHEAD_SECONDS);
     // The cap keeps the UI responsive even if density is raised while the tab stalls.
     let scheduled = 0;
-    while (this.nextGrainTime < horizon && scheduled < MAX_ACTIVE_GRAINS) {
+    const scheduleLimit = this.renderer ? 512 : MAX_ACTIVE_GRAINS;
+    while (this.nextGrainTime < horizon && scheduled < scheduleLimit) {
+      const moving = this.motion.granular(this.parameters, this.nextGrainTime, this.sampleDurationMs);
       if (this.activeGrains.size < MAX_ACTIVE_GRAINS) {
         let sourceBuffer = this.buffer;
-        const moving = this.motion.granular(this.parameters, this.nextGrainTime, this.sampleDurationMs);
         this.output.gain.setTargetAtTime(moving.gain, Math.max(context.currentTime, this.nextGrainTime), 0.08);
         let selectionStart = moving.selectionStart;
         let selectionEnd = moving.selectionEnd;
@@ -168,20 +186,20 @@ export class GranularEngine {
             selectionEnd = this.previousSelectionEnd;
           }
         }
-        this.scheduleGrain(this.nextGrainTime, sourceBuffer, selectionStart, selectionEnd);
+        this.scheduleGrain(this.nextGrainTime, sourceBuffer, selectionStart, selectionEnd, moving);
       }
-      this.nextGrainTime += 1 / Math.max(0.1, this.motion.granular(this.parameters, this.nextGrainTime, this.sampleDurationMs).density);
+      this.nextGrainTime += 1 / Math.max(0.1, moving.density);
       scheduled++;
     }
+    this.renderer?.flush(horizon);
     if (this.nextGrainTime < context.currentTime) {
       this.nextGrainTime = context.currentTime;
     }
   }
 
-  private scheduleGrain(time: number, buffer: AudioBuffer | null, selectionStart: number, selectionEnd: number): void {
+  private scheduleGrain(time: number, buffer: AudioBuffer | null, selectionStart: number, selectionEnd: number, p: Parameters): void {
     const context = this.context;
     if (!buffer) return;
-    const p = this.motion.granular(this.parameters, time, this.sampleDurationMs);
 
     const requestedDuration = between(p.lengthMin, p.lengthMax) / 1000;
     const low = Math.max(0, Math.min(selectionStart, selectionEnd) / 1000);
@@ -190,12 +208,17 @@ export class GranularEngine {
     const duration = Math.min(requestedDuration, buffer.duration - offset);
     if (duration <= 0.002) return;
 
+    const amplitude = between(p.ampMin, p.ampMax);
+    if (this.renderer) {
+      this.renderer.add(buffer, time, offset, duration, amplitude, this.motion.pan(time));
+      return;
+    }
+
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = FIXED_PLAYBACK_RATE;
 
     const envelope = context.createGain();
-    const amplitude = between(p.ampMin, p.ampMax);
     const attack = Math.max(0.002, duration * FIXED_ENVELOPE_SLOPE * 0.5);
     const release = Math.max(0.002, duration * FIXED_ENVELOPE_SLOPE * 0.5);
     const grainStart = Math.max(time, context.currentTime);

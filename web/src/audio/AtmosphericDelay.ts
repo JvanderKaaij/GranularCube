@@ -21,7 +21,8 @@ export class AtmosphericDelay {
       this.delays[side].delayTime.value = parameters.time;
       this.filters[side].type = 'lowpass';
       this.filters[side].frequency.value = 5000;
-      this.filters[side].Q.value = 0.5;
+      // Low-pass Q is expressed in dB; keep the feedback path non-resonant.
+      this.filters[side].Q.value = -6.0206;
       this.feedbacks[side].gain.value = parameters.feedback;
       this.pans[side].pan.value = side === 0 ? -0.85 : 0.85;
       this.delays[side].connect(this.filters[side]);

@@ -1,16 +1,17 @@
 import { sampleCatalog } from '../sampleCatalog';
+import { apiUrl, fallbackApiUrl } from './ApiOrigin';
 
-export const SFX_URL = 'http://localhost:8000/api/sfx';
-const FALLBACK_URL = 'http://127.0.0.1:8000/api/sfx';
-const SAMPLES_URL = 'http://localhost:8000/api/samples';
+export const SFX_URL = apiUrl('/api/sfx');
+const FALLBACK_URL = fallbackApiUrl('/api/sfx');
+const SAMPLES_URL = apiUrl('/api/samples');
 
 /** Read the server's authoritative built-in sample filenames before asking the model to select one. */
 export async function requestAvailableSamples(signal?: AbortSignal): Promise<string[]> {
   let response: Response;
   try { response = await fetch(SAMPLES_URL, { signal }); }
   catch (error) {
-    if (signal?.aborted) throw error;
-    response = await fetch('http://127.0.0.1:8000/api/samples', { signal });
+    if (signal?.aborted || fallbackApiUrl('/api/samples') === SAMPLES_URL) throw error;
+    response = await fetch(fallbackApiUrl('/api/samples'), { signal });
   }
   const body: unknown = await response.json();
   if (!response.ok || typeof body !== 'object' || body === null || !('samples' in body) || !Array.isArray(body.samples))
@@ -43,7 +44,7 @@ export async function requestSoundEffect(word: string, signal?: AbortSignal, opt
   try {
     response = await fetch(endpoint, request);
   } catch (error) {
-    if (signal?.aborted) throw error;
+    if (signal?.aborted || FALLBACK_URL === SFX_URL) throw error;
     endpoint = FALLBACK_URL;
     response = await fetch(endpoint, request);
   }

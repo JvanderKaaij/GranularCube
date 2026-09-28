@@ -1,5 +1,6 @@
-export const IMAGE_PATCH_URL = 'http://localhost:8000/api/image-patch';
-const FALLBACK_URL = 'http://127.0.0.1:8000/api/image-patch';
+import { apiUrl, fallbackApiUrl } from './ApiOrigin';
+export const IMAGE_PATCH_URL = apiUrl('/api/image-patch');
+const FALLBACK_URL = fallbackApiUrl('/api/image-patch');
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
@@ -31,7 +32,7 @@ export async function requestImagePatch(prompt: string, systemPrompt: string, fi
   try {
     response = await fetch(IMAGE_PATCH_URL, request);
   } catch (error) {
-    if (signal?.aborted) throw error;
+    if (signal?.aborted || FALLBACK_URL === IMAGE_PATCH_URL) throw error;
     response = await fetch(FALLBACK_URL, request);
   }
   let body: Record<string, unknown>;

@@ -15,17 +15,18 @@ export async function cleanOutput() {
 }
 
 export const buildOptions = {
-  entryPoints: [join(webRoot, 'src/main.ts')],
+  entryPoints: { app: join(webRoot, 'src/main.ts'), mobile: join(webRoot, 'src/mobile.ts') },
   bundle: true,
   format: 'esm',
   target: 'es2022',
-  outfile: join(outputRoot, 'app.js'),
+  outdir: outputRoot,
   logLevel: 'info',
 };
 
 export async function prepareOutput() {
   await mkdir(outputRoot, { recursive: true });
   await copyFile(join(webRoot, 'index.html'), join(outputRoot, 'index.html'));
+  await copyFile(join(webRoot, 'mobile.html'), join(outputRoot, 'mobile.html'));
   await copyFile(join(webRoot, 'phase-vocoder-processor.js'), join(outputRoot, 'phase-vocoder-processor.js'));
   await cp(samplesRoot, outputRoot, { recursive: true });
 }

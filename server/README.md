@@ -116,6 +116,12 @@ Each entry in `layout` also saves an `ignoreLlm` boolean for instruments, effect
 
 `layout[nodeId].ignoredParameters` stores the individual parameter keys protected by the small lock buttons beside each LFO. Missing lists default to empty. Duplicate or unknown keys are rejected on save. The client includes current locked values in the prompt/schema and preserves them through validation and application. A sample-window lock also retains the source recording.
 
+## Phone client
+
+After building `web/` with `npm run build`, `GET /mobile/` serves the phone player and `/mobile/*` serves its built assets. `GET /api/samples/{filename}` returns an existing built-in recording with filename and resolved-path checks. The player uses this server for setups, generated audio, piano samples and model requests; keys are never sent to the browser.
+
+For local phone development, run `npm run mobile` from `web/` while this API runs. That gateway binds to the computer's network interfaces on port 5174 and forwards requests to port 8000, including when the API is only reachable on the computer's localhost. See `web/README.md` for choosing a specific setup, phone capture and HTTPS for spectral processing.
+
 ## Piano key samples
 
 Place piano recordings in `../Samples/piano/`. `GET /api/piano-bank` reads the single SFZ there automatically, or an explicit `bank.json` selection/mapping, falling back to note-name/MIDI-number filenames when no SFZ exists (C4 = 60). The supplied `UprightPianoKW-small-bright-20190703.sfz` expands 26 recordings to all 88 playable keys. The response includes `{midi, filename, rootMidi, loopMode}` mappings, loop start/end seconds where applicable, SFZ filename and default release. Loop frame indices are converted using the original WAV sample rate, including the SFZ's inclusive end frame. Sample paths support subfolders and this bank's flattened layout. The revision includes the SFZ contents, mapping and recording metadata. Overlapping zones, unsupported opcodes and missing files return readable errors. No provider calls are needed. See `Samples/piano/README.md` for the supported SFZ subset.

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI, APIError as OpenAIAPIError, AuthenticationError as OpenAIAuthError, RateLimitError as OpenAIRateLimitError
 from elevenlabs.client import AsyncElevenLabs
@@ -23,6 +24,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 SFX_DIR = STATIC_DIR / "sfx"
 SFX_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "Samples"
+WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 app = FastAPI(
     title="AI Audio & Text Proxy API",
@@ -43,6 +45,27 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.include_router(create_setup_router(Path(__file__).resolve().parent / "data", SAMPLES_DIR))
 app.include_router(create_piano_router(SAMPLES_DIR / "piano"))
+
+
+@app.get("/mobile/", include_in_schema=False)
+async def mobile_player():
+    page = WEB_DIST / "mobile.html"
+    if not page.is_file():
+        raise HTTPException(503, "Build the web client first: npm run build in web/")
+    return FileResponse(page, headers={"Cache-Control": "no-cache"})
+
+
+app.mount("/mobile", StaticFiles(directory=str(WEB_DIST), check_dir=False), name="mobile")
+
+
+@app.get("/api/samples/{filename}")
+async def builtin_sample(filename: str):
+    if not re.fullmatch(r"[\w.-]+\.(wav|aif|aiff|mp3|m4a|ogg)", filename, re.IGNORECASE):
+        raise HTTPException(404, "Sample not found")
+    path = (SAMPLES_DIR / filename).resolve()
+    if not path.is_relative_to(SAMPLES_DIR.resolve()) or not path.is_file():
+        raise HTTPException(404, "Sample not found")
+    return FileResponse(path)
 
 
 @app.get("/api/samples")

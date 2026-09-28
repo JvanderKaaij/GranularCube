@@ -1,4 +1,5 @@
 import { AtmosphericDelay } from './AtmosphericDelay';
+import { MobileReverb } from './MobileReverb';
 import { CloudReverb } from './CloudReverb';
 import { parameterLfoValue, type ParameterLfoMap } from './ParameterLfo';
 
@@ -53,7 +54,7 @@ export class EffectNode {
   private readonly processed: GainNode;
   private filter?: BiquadFilterNode;
   private delay?: AtmosphericDelay;
-  private reverb?: CloudReverb;
+  private reverb?: CloudReverb | MobileReverb;
   private spectral?: AudioWorkletNode;
   private spectralStatus = '';
   private disposed = false;
@@ -62,7 +63,7 @@ export class EffectNode {
   private decayTimer?: ReturnType<typeof setTimeout>;
   private lfos: ParameterLfoMap = {};
   private lastDecayLfoAt = -Infinity;
-  constructor(private context: AudioContext, readonly type: EffectKind) {
+  constructor(private context: AudioContext, readonly type: EffectKind, mobile = false) {
     this.values = { ...effectDefaults[type] };
     this.input = context.createGain(); this.output = context.createGain();
     this.bypassPath = context.createGain(); this.send = context.createGain(); this.processed = context.createGain();
@@ -77,7 +78,9 @@ export class EffectNode {
       this.delay = new AtmosphericDelay(context, this.processed, { mix: Number(this.values.mix), time: Number(this.values.time), feedback: Number(this.values.feedback) });
       this.send.connect(this.delay.input);
     } else if (type === 'reverb') {
-      this.reverb = new CloudReverb(context, this.processed, Number(this.values.mix), Number(this.values.decay), 0);
+      this.reverb = mobile
+        ? new MobileReverb(context, this.processed, Number(this.values.mix), Number(this.values.decay))
+        : new CloudReverb(context, this.processed, Number(this.values.mix), Number(this.values.decay), 0);
       this.send.connect(this.reverb.input);
     } else {
       // Keep a clean passthrough until the worklet is ready or if the browser cannot load it.

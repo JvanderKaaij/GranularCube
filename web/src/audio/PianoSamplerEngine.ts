@@ -1,3 +1,4 @@
+import { audioLookAhead, startAudioClock } from './AudioClock';
 import { pianoDefaults, pianoControls, parsePianoGestures, validatePianoBank, type PianoParameters, type PianoBank, type PianoGesture, type PianoSample } from './PianoProgram';
 import { pianoSampleUrl } from '../ai/PianoBankClient';
 import { AmbientMotion, type Movement } from './AmbientMotion';
@@ -45,7 +46,7 @@ export class PianoSamplerEngine {
   private playing = false;
   private disposed = false;
   private revision = 0;
-  private timer: number | null = null;
+  private timer: (() => void) | null = null;
   private nextGestureTime = 0;
   private previousGesture = -1;
   constructor(private readonly context: AudioContext, destination: AudioNode) {
@@ -107,7 +108,7 @@ export class PianoSamplerEngine {
     if (this.disposed) throw new Error('Piano sampler was removed');
     if (this.playing) return;
     this.playing = true; this.nextGestureTime = this.context.currentTime + 0.15;
-    this.tick(); this.timer = window.setInterval(() => this.tick(), 100);
+    this.tick(); this.timer = startAudioClock(this.context, () => this.tick(), 100);
   }
   async preview(index = 0): Promise<void> {
     if (!this.gestures[index]) throw new Error('Load a playable piano bank first.');
@@ -119,7 +120,7 @@ export class PianoSamplerEngine {
     if (!this.playing || !this.gestures.length) return;
     const now = this.context.currentTime;
     this.applyParameterLfos(now);
-    if (this.nextGestureTime > now + 0.15) return;
+    if (this.nextGestureTime > now + audioLookAhead(this.context, 0.15)) return;
     const candidates = this.gestures.map((_, index) => index).filter((index) => this.gestures.length === 1 || index !== this.previousGesture);
     const index = candidates[Math.floor(Math.random() * candidates.length)];
     const at = Math.max(now + 0.02, this.nextGestureTime);
@@ -165,7 +166,7 @@ export class PianoSamplerEngine {
   }
   stop(): void {
     this.playing = false;
-    if (this.timer !== null) window.clearInterval(this.timer); this.timer = null;
+    if (this.timer !== null) this.timer(); this.timer = null;
     for (const voice of [...this.voices]) this.stopVoice(voice);
   }
   dispose(): void { this.disposed = true; this.stop(); this.buffers.clear(); this.output.disconnect(); }

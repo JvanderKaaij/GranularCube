@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "mobile": "node scripts/mobile.mjs",
     "build": "tsc --noEmit && node scripts/build.mjs",
     "test:patch": "node scripts/test-patch-plan.mjs && node scripts/test-transition.mjs",
     "test:sfx": "node scripts/test-sfx-client.mjs"

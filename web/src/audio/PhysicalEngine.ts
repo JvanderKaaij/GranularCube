@@ -1,3 +1,4 @@
+import { audioLookAhead, startAudioClock } from './AudioClock';
 import { physicalDefaults, type PhysicalParameters } from '../parameters';
 import { AmbientMotion, type Movement } from './AmbientMotion';
 import type { ParameterLfoMap } from './ParameterLfo';
@@ -42,7 +43,7 @@ export class PhysicalEngine {
   private parameters: PhysicalParameters = { ...physicalDefaults };
   private readonly motion = new AmbientMotion(Math.random() * 20);
   private sequence = [...DEFAULT_SEQUENCE];
-  private timer: number | null = null;
+  private timer: (() => void) | null = null;
   private nextStrikeTime = 0;
   private stepIndex = 0;
   private playing = false;
@@ -80,7 +81,7 @@ export class PhysicalEngine {
     this.playing = true;
     this.nextStrikeTime = this.context.currentTime + 0.02;
     this.schedule();
-    this.timer = window.setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
+    this.timer = startAudioClock(this.context, () => this.schedule(), SCHEDULER_INTERVAL_MS);
   }
 
   async strike(): Promise<void> {
@@ -90,7 +91,7 @@ export class PhysicalEngine {
 
   stop(): void {
     this.playing = false;
-    if (this.timer !== null) window.clearInterval(this.timer);
+    if (this.timer !== null) this.timer();
     this.timer = null;
     for (const voice of this.voices) {
       for (const source of voice.sources) {
@@ -107,7 +108,8 @@ export class PhysicalEngine {
 
   private schedule(): void {
     if (!this.playing) return;
-    const horizon = this.context.currentTime + LOOK_AHEAD_SECONDS;
+    this.nextStrikeTime = Math.max(this.nextStrikeTime, this.context.currentTime);
+    const horizon = this.context.currentTime + audioLookAhead(this.context, LOOK_AHEAD_SECONDS);
     let scheduled = 0;
     while (this.nextStrikeTime < horizon && scheduled < MAX_ACTIVE_STRIKES) {
       if (this.voices.size < MAX_ACTIVE_STRIKES) {

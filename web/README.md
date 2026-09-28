@@ -12,6 +12,27 @@ npm run dev
 
 Open the local address printed by the dev server. Each **granular~** module has independent sample, parameter, and playback controls. The left module library groups **INSTRUMENTS** in blue and **EFFECTS** in amber, separated by a divider. Click **granular~**, **physical~**, or **piano_sampler~** to add an instrument, or **■ STOP ALL** to stop every module. Browsers require a click before audio output starts. Restart the dev server after adding or changing built-in granular files in `../Samples`; piano keys are served directly by the Python server.
 
+## Phone player
+
+The separate museum client has a camera/photo picker, play/pause, calculation stages with elapsed time, cancellation and a small Settings panel for saved setups and models. It creates the actual audio graph without rendering any editor nodes or debug controls. The desktop editor remains at its usual address.
+
+Keep the Python API running, then start the phone client in a second terminal:
+
+```sh
+cd web
+npm run mobile
+```
+
+Open the printed **Phone on the same Wi-Fi** address on your phone (normally `http://YOUR-COMPUTER-IP:5174/`). The computer and phone must be on the same network, with incoming connections to port 5174 allowed. This command serves the client and proxies its API/audio requests to `http://127.0.0.1:8000`, so it also works with a backend exposed from WSL only on the computer's localhost. Set `GRANULARCUBE_API_ORIGIN` if that backend is elsewhere; `MOBILE_PORT` changes the listening port. API keys stay on the Python server.
+
+The server's chosen startup setup loads automatically with playback paused. Use **Settings → Sound setup → Load setup** to choose another. The URL records `?setup=ID`, so bookmarking/sharing it opens that particular saved setup. If no default is selected, the player asks you to choose one. It restores instruments, effect routing and bypass, authored settings, samples, piano mapping/gestures, modulation, prompt overrides, transition time and all LLM locks. Play uses the saved active voices; when all voices were saved stopped, Play auditions all playable instruments. Image compositions activate editable voices as in the editor.
+
+**Photograph artwork** opens the phone's rear-camera capture flow; **Choose from photos** opens its library. Selecting a photo immediately starts composition. Browser-decodable photos are resized to at most 1600 pixels and converted to JPEG before upload. Existing music continues during interpretation, parameter/SFX generation and decoding, then transitions when every recording is ready. Missing recordings prevent application. Settings offers separate painting and composition models, initially taken from the saved setup; phone overrides apply to this session's next request. Choose **Compose again** to retry the current photo with different models.
+
+The phone browser needs a tap to start audio and can interrupt playback during camera use or while backgrounded. Return to the player and tap Play if needed. The player requests a screen wake lock while listening when supported. **Spectral AudioWorklet processing and screen wake locks require HTTPS on phones.** For the development gateway, set both `MOBILE_TLS_CERT` and `MOBILE_TLS_KEY` to a certificate/key trusted by the phone for your computer's address; the same command then serves HTTPS. An HTTPS reverse proxy to the Python server is another option. Other instruments and effects can use local HTTP.
+
+`npm run build` builds both clients. The Python API can serve the built player directly at `/mobile/` (for example `http://YOUR-COMPUTER-IP:8000/mobile/`) when its port is reachable from the phone. The setup selector and URLs work identically there. The mobile entry is `src/mobile.ts`; `audio/HeadlessPatch.ts` runs the saved graph and transitions; `ai/ComposePainting.ts` uses the editor's shared prompt, schema, validation and sample-selection functions.
+
 ## Patching
 
 - Drag a node header to move it. Focus a header and use arrow keys (Shift for larger steps) to move it with the keyboard.
@@ -125,6 +146,14 @@ Run npm run test:patch for composition, ranked sample choices, presets, overlap/
 
 A different synth type can be added as another audio engine and matching panel. `AudioRack.addModule()` registers its output under a node ID; the graph determines its route to master. Legacy source effect fields remain in internal parameter types for older patch compatibility, but they do not process audio or appear as source controls in new composition schemas.
 
-This is an initial port of the granular voice, not a bit-for-bit reproduction of Max. The browser scheduler allows up to 64 concurrent grains per module and exposes density up to 60 grains per second as a practical starting range. Master has no hidden effects.
+This is an initial port of the granular voice, not a bit-for-bit reproduction of Max. The browser scheduler allows up to 64 concurrent grains per module and exposes density up to 60 grains per second as a practical starting range. The desktop master has no hidden effects.
+
+### Mobile audio and screen locking
+
+The phone player requests playback latency, uses a shared worker scheduling clock with additional lookahead, and skips overdue grains/strikes after a stall instead of playing them all at once. It uses a lightweight stereo feedback reverb rather than long convolution impulses; saved mix/decay values and routing still apply, but the reverb character differs from the desktop. A master compressor controls overlapping peaks without changing saved module levels.
+
+Mobile granular voices mix grains in a dedicated worker into half-second stereo buffers. This replaces per-grain source/envelope/panner node creation with two playback sources per second, while preserving grain windows, envelopes, density, panning and movement. The queue covers roughly two seconds while visible and four while hidden, so granular parameter/sample changes can take that long to become audible (plus up to one half-second chunk). The 64-grain limit counts actual overlap rather than all future queued grains. Workers are usable over LAN HTTP; native per-grain playback remains the fallback if worker startup fails. This is still live generative audio, not a repeating recorded soundscape. The shared scheduler ticks less frequently when hidden, and effect/master modulation uses that clock as well.
+
+The player requests the browser's playback audio-session type where supported and registers Media Session play/pause controls. Hiding the page no longer explicitly pauses the engine. Screen locking can still suspend the browser or its JavaScript scheduler, so these changes do not guarantee continuous screen-off synthesis on every phone. HTTPS enables the screen wake lock while the player is visible (and is required for spectral AudioWorklets); it does not override OS background restrictions. Resume returns to the current patch without a burst of missed notes. Device/browser testing is still needed before relying on a two-hour locked-screen session.
 
 Grain playback rate is fixed at 1, and envelope slope is fixed at 0.5. These are internal constants in `GranularEngine.ts` and are not shown as controls.
